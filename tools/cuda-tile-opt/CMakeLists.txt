@@ -14,6 +14,7 @@ set(LIBS
   MLIRIR
   CudaTileDialect
   CudaTileTransforms
+  CudaTileToStd
   )
 
 add_mlir_tool(cuda-tile-opt
