@@ -28,6 +28,25 @@ using namespace mlir;
 using namespace mlir::cuda_tile;
 using namespace llvm;
 
+class CudaTileTypeConverter : public mlir::TypeConverter {
+public:
+  CudaTileTypeConverter() {
+    addConversion([](Type type) { return type; });
+
+    addConversion([&](cuda_tile::TileType type) -> Type {
+      return convertTileToVector(type);
+    });
+  }
+
+private:
+  Type convertTileToVector(cuda_tile::TileType type) const {
+    auto shape = type.getShape();
+    Type elementType = type.getElementType();
+
+    return VectorType::get(shape, elementType);
+  }
+};
+
 struct ConvertEntryToFunc : public OpConversionPattern<cuda_tile::EntryOp> {
   using OpConversionPattern<cuda_tile::EntryOp>::OpConversionPattern;
 
@@ -44,8 +63,7 @@ struct ConvertEntryToFunc : public OpConversionPattern<cuda_tile::EntryOp> {
   }
 };
 
-struct ConvertCudaTileReturn
-    : public OpConversionPattern<cuda_tile::ReturnOp> {
+struct ConvertCudaTileReturn : public OpConversionPattern<cuda_tile::ReturnOp> {
   using OpConversionPattern<cuda_tile::ReturnOp>::OpConversionPattern;
 
   LogicalResult
@@ -63,6 +81,34 @@ struct ConvertCudaTileReturn
   }
 };
 
+struct ConvertCudaTileConstant
+    : public OpConversionPattern<cuda_tile::ConstantOp> {
+  using OpConversionPattern<cuda_tile::ConstantOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(cuda_tile::ConstantOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+
+    auto oldType = op.getResult().getType();
+    auto vecType =
+        dyn_cast<VectorType>(getTypeConverter()->convertType(oldType));
+
+    if (!vecType) {
+      return failure();
+    }
+
+    auto oldAttr = dyn_cast<DenseElementsAttr>(op.getValueAttr());
+    if (!oldAttr) {
+      return failure();
+    }
+
+    auto newAttr = oldAttr.reshape(vecType);
+    rewriter.replaceOpWithNewOp<arith::ConstantOp>(op, vecType, newAttr);
+
+    return success();
+  }
+};
+
 struct CudaTileConvertToStd
     : public mlir::cuda_tile::impl::CudaTileConvertToStdBase<
           CudaTileConvertToStd> {
@@ -76,13 +122,16 @@ struct CudaTileConvertToStd
     cuda_tile::ModuleOp mod = getOperation();
 
     ConversionTarget target(*context);
-    target
-        .addLegalDialect<BuiltinDialect, CudaTileDialect, func::FuncDialect>();
-    target.addIllegalOp<IotaOp, EntryOp, cuda_tile::ReturnOp>();
+    CudaTileTypeConverter typeConverter;
+
+    target.addLegalDialect<BuiltinDialect, arith::ArithDialect, CudaTileDialect,
+                           func::FuncDialect>();
+    target.addIllegalOp<cuda_tile::ConstantOp, IotaOp, EntryOp,
+                        cuda_tile::ReturnOp>();
 
     RewritePatternSet patterns(context);
-    patterns.add<ConvertEntryToFunc,
-                 ConvertCudaTileReturn>(context);
+    patterns.add<ConvertEntryToFunc, ConvertCudaTileReturn,
+                 ConvertCudaTileConstant>(typeConverter, context);
 
     if (failed(applyPartialConversion(mod, target, std::move(patterns)))) {
       signalPassFailure();
