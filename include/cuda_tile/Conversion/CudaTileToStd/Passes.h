@@ -7,7 +7,7 @@
 namespace mlir {
 namespace cuda_tile {
 
-std::unique_ptr<OperationPass<cuda_tile::ModuleOp>>
+std::unique_ptr<OperationPass<mlir::ModuleOp>>
 createCudaTileConvertToStd();
 
 #define GEN_PASS_DECL

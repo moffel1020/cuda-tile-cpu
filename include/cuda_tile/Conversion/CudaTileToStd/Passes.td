@@ -3,7 +3,7 @@
 
 include "mlir/Pass/PassBase.td"
 
-def CudaTileConvertToStd : Pass<"cuda-tile-convert-to-std", "mlir::cuda_tile::ModuleOp"> {
+def CudaTileConvertToStd : Pass<"cuda-tile-convert-to-std", "mlir::ModuleOp"> {
   let summary = "Convert cuda tile to standard dialects";
   let description = [{
   }];

@@ -109,6 +109,63 @@ struct ConvertCudaTileConstant
   }
 };
 
+struct ConvertCudaTileAddi : public OpConversionPattern<cuda_tile::AddIOp> {
+  using OpConversionPattern<cuda_tile::AddIOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(cuda_tile::AddIOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+
+    auto overflow = std::invoke(
+        [](auto ctOverflow) {
+          using aro = arith::IntegerOverflowFlags;
+          using cto = cuda_tile::IntegerOverflow;
+
+          switch (ctOverflow) {
+          case cto::NONE:
+            return aro::none;
+          case cto::NSW:
+            return aro::nsw;
+          case cto::NUW:
+            return aro::nuw;
+          case cto::NW:
+            return aro::nsw | aro::nuw;
+          }
+        },
+        op.getOverflow());
+
+    auto left = adaptor.getLhs();
+    auto right = adaptor.getRhs();
+
+    rewriter.replaceOpWithNewOp<arith::AddIOp>(op, left, right, overflow);
+    return success();
+  }
+};
+
+struct MoveOutOfCudaTileModule
+    : public OpConversionPattern<cuda_tile::ModuleOp> {
+  using OpConversionPattern<cuda_tile::ModuleOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(cuda_tile::ModuleOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+
+    // NOTE: we assume that there are no other functions defined inside the
+    // mlir::ModuleOp, otherwise there might be a collision
+
+    mlir::ModuleOp parent = op->getParentOfType<mlir::ModuleOp>();
+    Block &parentBlock = parent.getBodyRegion().front();
+
+    for (auto &innerOp :
+         llvm::make_early_inc_range(op.getBodyRegion().front())) {
+      innerOp.moveBefore(&parentBlock, parentBlock.end());
+    }
+
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 struct CudaTileConvertToStd
     : public mlir::cuda_tile::impl::CudaTileConvertToStdBase<
           CudaTileConvertToStd> {
@@ -119,19 +176,19 @@ struct CudaTileConvertToStd
 
   void runOnOperation() override {
     MLIRContext *context = &getContext();
-    cuda_tile::ModuleOp mod = getOperation();
+    mlir::ModuleOp mod = getOperation();
 
     ConversionTarget target(*context);
     CudaTileTypeConverter typeConverter;
 
-    target.addLegalDialect<BuiltinDialect, arith::ArithDialect, CudaTileDialect,
-                           func::FuncDialect>();
-    target.addIllegalOp<cuda_tile::ConstantOp, IotaOp, EntryOp,
-                        cuda_tile::ReturnOp>();
+    target.addIllegalDialect<CudaTileDialect>();
+    target.addLegalDialect<arith::ArithDialect, func::FuncDialect>();
 
     RewritePatternSet patterns(context);
-    patterns.add<ConvertEntryToFunc, ConvertCudaTileReturn,
-                 ConvertCudaTileConstant>(typeConverter, context);
+    patterns
+        .add<ConvertEntryToFunc, ConvertCudaTileReturn, ConvertCudaTileConstant,
+             ConvertCudaTileAddi, MoveOutOfCudaTileModule>(typeConverter,
+                                                           context);
 
     if (failed(applyPartialConversion(mod, target, std::move(patterns)))) {
       signalPassFailure();
@@ -145,8 +202,7 @@ struct CudaTileConvertToStd
 namespace mlir {
 namespace cuda_tile {
 
-std::unique_ptr<OperationPass<cuda_tile::ModuleOp>>
-createCudaTileConvertToStd() {
+std::unique_ptr<OperationPass<mlir::ModuleOp>> createCudaTileConvertToStd() {
   return std::make_unique<CudaTileConvertToStd>();
 }
 
