@@ -34,6 +34,11 @@ public:
     addConversion([](Type type) { return type; });
 
     addConversion([&](cuda_tile::TileType type) -> Type {
+      if (auto ptrType =
+              dyn_cast<cuda_tile::PointerType>(type.getElementType())) {
+        return convertPtrTileToMemref(ptrType);
+      }
+
       return convertTileToVector(type);
     });
   }
@@ -44,6 +49,11 @@ private:
     Type elementType = type.getElementType();
 
     return VectorType::get(shape, elementType);
+  }
+
+  Type convertPtrTileToMemref(cuda_tile::PointerType ptrType) const {
+    auto pointee = ptrType.getPointeeType();
+    return MemRefType::get({ShapedType::kDynamic}, pointee);
   }
 };
 
@@ -57,7 +67,7 @@ struct ConvertEntryToFunc : public OpConversionPattern<cuda_tile::EntryOp> {
     auto func = func::FuncOp::create(rewriter, op.getLoc(), op.getName(),
                                      op.getFunctionType());
     rewriter.inlineRegionBefore(op.getRegion(), func.getBody(), func.end());
-    rewriter.eraseOp(op);
+    rewriter.replaceOp(op, func);
 
     return success();
   }
@@ -181,14 +191,21 @@ struct CudaTileConvertToStd
     ConversionTarget target(*context);
     CudaTileTypeConverter typeConverter;
 
-    target.addIllegalDialect<CudaTileDialect>();
-    target.addLegalDialect<arith::ArithDialect, func::FuncDialect>();
-
     RewritePatternSet patterns(context);
     patterns
         .add<ConvertEntryToFunc, ConvertCudaTileReturn, ConvertCudaTileConstant,
              ConvertCudaTileAddi, MoveOutOfCudaTileModule>(typeConverter,
                                                            context);
+
+    target.addIllegalDialect<CudaTileDialect>();
+    target.addLegalDialect<arith::ArithDialect, func::FuncDialect>();
+
+    populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(
+        patterns, typeConverter);
+    target.addDynamicallyLegalOp<func::FuncOp>([&](func::FuncOp op) {
+      return typeConverter.isSignatureLegal(op.getFunctionType()) &&
+             typeConverter.isLegal(&op.getBody());
+    });
 
     if (failed(applyPartialConversion(mod, target, std::move(patterns)))) {
       signalPassFailure();
