@@ -6,13 +6,13 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
-#include "cuda_tile/Conversion/CudaTileToStd/Passes.h"
 #include "mlir/IR/Dialect.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/Tools/mlir-opt/MlirOptMain.h"
 #include "mlir/Transforms/Passes.h"
 
 #include "cuda_tile/Dialect/CudaTile/Transforms/Passes.h"
+#include "cuda_tile_cpu/Conversion/CudaTileToStd/Passes.h"
 
 int main(int argc, char **argv) {
   mlir::DialectRegistry registry;
@@ -23,7 +23,7 @@ int main(int argc, char **argv) {
   mlir::registerInlinerPass();
   mlir::cuda_tile::registerCudaTilePasses();
 
-  mlir::cuda_tile::registerCudaTileToStdPasses();
+  mlir::cuda_tile::cpu::registerCudaTileToStdPasses();
 
   return mlir::asMainReturnCode(
       mlir::MlirOptMain(argc, argv, "CudaTile test driver\n", registry));

@@ -8,7 +8,7 @@ def CudaTileConvertToStd : Pass<"cuda-tile-convert-to-std", "mlir::ModuleOp"> {
   let description = [{
   }];
 
-  let constructor = "mlir::cuda_tile::createCudaTileConvertToStd()";
+  let constructor = "mlir::cuda_tile::cpu::createCudaTileConvertToStd()";
   let dependentDialects = ["mlir::cuda_tile::CudaTileDialect",
                            "mlir::arith::ArithDialect",
                            "mlir::vector::VectorDialect",

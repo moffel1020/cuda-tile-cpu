@@ -151,6 +151,11 @@ endif()
 include_directories(${CUDA_TILE_SOURCE_DIR}/include)
 include_directories(${CUDA_TILE_BINARY_DIR}/include)
 
+# Include directories for CUDA Tile CPU.
+include_directories(${CUDA_TILE_SOURCE_DIR}/cpu/include)
+include_directories(${CUDA_TILE_BINARY_DIR}/cpu/include)
+
+
 # Place generated executables (and libraries) in bin (or lib), instead of
 # tools/<tool_name>/.
 set(LLVM_RUNTIME_OUTPUT_INTDIR ${CUDA_TILE_BINARY_DIR}/bin)
@@ -188,6 +193,7 @@ endif()
 
 add_subdirectory(include)
 add_subdirectory(lib)
+add_subdirectory(cpu)
 
 if(CUDA_TILE_ENABLE_TESTING)
   add_subdirectory(test)
