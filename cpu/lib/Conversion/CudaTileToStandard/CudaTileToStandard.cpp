@@ -1,5 +1,5 @@
-#include "cuda_tile_cpu/Conversion/CudaTileToStd/Passes.h"
 #include "cuda_tile/Dialect/CudaTile/IR/Ops.h"
+#include "cuda_tile_cpu/Conversion/CudaTileToStandard/Passes.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -17,8 +17,8 @@ namespace mlir {
 namespace cuda_tile {
 namespace cpu {
 
-#define GEN_PASS_DEF_CUDATILECONVERTTOSTD
-#include "cuda_tile_cpu/Conversion/CudaTileToStd/Passes.h.inc"
+#define GEN_PASS_DEF_CONVERTCUDATILETOSTANDARD
+#include "cuda_tile_cpu/Conversion/CudaTileToStandard/Passes.h.inc"
 
 } // namespace cpu
 } // namespace cuda_tile
@@ -142,6 +142,8 @@ struct ConvertCudaTileAddi : public OpConversionPattern<cuda_tile::AddIOp> {
             return aro::nuw;
           case cto::NW:
             return aro::nsw | aro::nuw;
+          default:
+            return aro::none;
           }
         },
         op.getOverflow());
@@ -178,13 +180,13 @@ struct MoveOutOfCudaTileModule
   }
 };
 
-struct CudaTileConvertToStd
-    : public mlir::cuda_tile::cpu::impl::CudaTileConvertToStdBase<
-          CudaTileConvertToStd> {
+struct ConvertCudaTileToStandard
+    : public mlir::cuda_tile::cpu::impl::ConvertCudaTileToStandardBase<
+          ConvertCudaTileToStandard> {
 
-  using CudaTileConvertToStdBase::CudaTileConvertToStdBase;
+  using ConvertCudaTileToStandardBase::ConvertCudaTileToStandardBase;
 
-  CudaTileConvertToStd() : CudaTileConvertToStdBase() {}
+  ConvertCudaTileToStandard() : ConvertCudaTileToStandardBase() {}
 
   void runOnOperation() override {
     MLIRContext *context = &getContext();
@@ -222,8 +224,9 @@ namespace mlir {
 namespace cuda_tile {
 namespace cpu {
 
-std::unique_ptr<OperationPass<mlir::ModuleOp>> createCudaTileConvertToStd() {
-  return std::make_unique<CudaTileConvertToStd>();
+std::unique_ptr<OperationPass<mlir::ModuleOp>>
+createConvertCudaTileToStandard() {
+  return std::make_unique<ConvertCudaTileToStandard>();
 }
 
 } // namespace cpu

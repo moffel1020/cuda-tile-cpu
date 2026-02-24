@@ -1,1 +1,1 @@
-add_subdirectory(CudaTileToStd)
+add_subdirectory(CudaTileToStandard)

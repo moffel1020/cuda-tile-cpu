@@ -1,8 +1,8 @@
-add_mlir_conversion_library(CudaTileToStd
-  CudaTileToStd.cpp
+add_mlir_conversion_library(CudaTileToStandard
+  CudaTileToStandard.cpp
 
   DEPENDS
-  CudaTileToStdPassIncGen
+  CudaTileToStandardPassIncGen
 
   LINK_LIBS PUBLIC
   MLIRIR

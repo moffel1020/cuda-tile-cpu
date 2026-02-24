@@ -12,7 +12,7 @@
 #include "mlir/Transforms/Passes.h"
 
 #include "cuda_tile/Dialect/CudaTile/Transforms/Passes.h"
-#include "cuda_tile_cpu/Conversion/CudaTileToStd/Passes.h"
+#include "cuda_tile_cpu/Conversion/CudaTileToStandard/Passes.h"
 
 int main(int argc, char **argv) {
   mlir::DialectRegistry registry;
@@ -23,7 +23,7 @@ int main(int argc, char **argv) {
   mlir::registerInlinerPass();
   mlir::cuda_tile::registerCudaTilePasses();
 
-  mlir::cuda_tile::cpu::registerCudaTileToStdPasses();
+  mlir::cuda_tile::cpu::registerCudaTileToStandardPasses();
 
   return mlir::asMainReturnCode(
       mlir::MlirOptMain(argc, argv, "CudaTile test driver\n", registry));
