@@ -10,6 +10,7 @@ add_mlir_conversion_library(CudaTileToStandard
   MLIRDialectUtils
   MLIRTransforms
   CudaTileDialect
+  CudaTileCPUDialect
   MLIRVectorDialect
   MLIRSCFDialect
   MLIRFuncDialect

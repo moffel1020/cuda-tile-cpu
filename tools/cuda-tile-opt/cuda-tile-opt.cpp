@@ -13,11 +13,13 @@
 
 #include "cuda_tile/Dialect/CudaTile/Transforms/Passes.h"
 #include "cuda_tile_cpu/Conversion/CudaTileToStandard/Passes.h"
+#include "cuda_tile_cpu/Dialect/CudaTileCPU/IR/Dialect.h"
 
 int main(int argc, char **argv) {
   mlir::DialectRegistry registry;
 
-  registry.insert<mlir::cuda_tile::CudaTileDialect>();
+  registry.insert<mlir::cuda_tile::CudaTileDialect,
+                  mlir::cuda_tile::cpu::CudaTileCPUDialect>();
   mlir::registerCanonicalizerPass();
   mlir::registerCSEPass();
   mlir::registerInlinerPass();

@@ -1,5 +1,6 @@
 #include "cuda_tile/Dialect/CudaTile/IR/Ops.h"
 #include "cuda_tile_cpu/Conversion/CudaTileToStandard/Passes.h"
+#include "cuda_tile_cpu/Dialect/CudaTileCPU/IR/Dialect.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -7,9 +8,8 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/BuiltinDialect.h"
-#include "mlir/Transforms/DialectConversion.h"
-
 #include "mlir/Pass/Pass.h"
+#include "mlir/Transforms/DialectConversion.h"
 
 #include <memory>
 
@@ -156,6 +156,23 @@ struct ConvertCudaTileAddi : public OpConversionPattern<cuda_tile::AddIOp> {
   }
 };
 
+struct ConvertCudaTilePrint : public OpConversionPattern<cuda_tile::PrintOp> {
+  using OpConversionPattern<cuda_tile::PrintOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(cuda_tile::PrintOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+
+    // TODO: emit function calls when going to llvm
+    // TODO: need to alloc memref from vector and use it in the new print op
+    auto cpuPrint =
+        cpu::PrintOp::create(rewriter, op.getLoc(), op.getStr(), {});
+
+    rewriter.replaceOp(op, cpuPrint);
+    return success();
+  }
+};
+
 struct MoveOutOfCudaTileModule
     : public OpConversionPattern<cuda_tile::ModuleOp> {
   using OpConversionPattern<cuda_tile::ModuleOp>::OpConversionPattern;
@@ -196,20 +213,24 @@ struct ConvertCudaTileToStandard
     CudaTileTypeConverter typeConverter;
 
     RewritePatternSet patterns(context);
-    patterns
-        .add<ConvertEntryToFunc, ConvertCudaTileReturn, ConvertCudaTileConstant,
-             ConvertCudaTileAddi, MoveOutOfCudaTileModule>(typeConverter,
-                                                           context);
+    patterns.add<ConvertEntryToFunc, ConvertCudaTileReturn,
+                 ConvertCudaTileConstant, ConvertCudaTileAddi,
+                 ConvertCudaTilePrint /*, MoveOutOfCudaTileModule*/>(
+        typeConverter, context);
 
     target.addIllegalDialect<CudaTileDialect>();
-    target.addLegalDialect<arith::ArithDialect, func::FuncDialect>();
+    target.addLegalDialect<arith::ArithDialect, func::FuncDialect,
+                           memref::MemRefDialect, vector::VectorDialect,
+                           cuda_tile::cpu::CudaTileCPUDialect>();
+    target.addLegalOp<cuda_tile::ModuleOp>();
 
-    populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(
-        patterns, typeConverter);
-    target.addDynamicallyLegalOp<func::FuncOp>([&](func::FuncOp op) {
-      return typeConverter.isSignatureLegal(op.getFunctionType()) &&
-             typeConverter.isLegal(&op.getBody());
-    });
+    // populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(
+    //     patterns, typeConverter);
+
+    // target.addDynamicallyLegalOp<func::FuncOp>([&](func::FuncOp op) {
+    //   return typeConverter.isSignatureLegal(op.getFunctionType()) &&
+    //          typeConverter.isLegal(&op.getBody());
+    // });
 
     if (failed(applyPartialConversion(mod, target, std::move(patterns)))) {
       signalPassFailure();

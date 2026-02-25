@@ -14,6 +14,8 @@ set(LIBS
   MLIRIR
   CudaTileDialect
   CudaTileTransforms
+
+  CudaTileCPUDialect
   CudaTileToStandard
   )
 
