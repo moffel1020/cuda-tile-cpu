@@ -164,11 +164,35 @@ struct ConvertCudaTilePrint : public OpConversionPattern<cuda_tile::PrintOp> {
                   ConversionPatternRewriter &rewriter) const override {
 
     // TODO: emit function calls when going to llvm
-    // TODO: need to alloc memref from vector and use it in the new print op
-    auto cpuPrint =
-        cpu::PrintOp::create(rewriter, op.getLoc(), op.getStr(), {});
 
-    rewriter.replaceOp(op, cpuPrint);
+    if (op.getNumOperands() == 0) {
+      auto cpuPrint =
+          cpu::PrintOp::create(rewriter, op.getLoc(), op.getStr(), {});
+      rewriter.eraseOp(op);
+      return success();
+    }
+
+    for (auto arg : op.getArgs()) {
+      if (!isa<TileType>(arg.getType())) {
+        llvm_unreachable("unimplemented print type");
+        return failure();
+      }
+
+      // store the vector arg in a memref to call print
+      auto loc = op.getLoc();
+      auto tile = cast<TileType>(arg.getType());
+      auto memType = MemRefType::get(tile.getShape(), tile.getElementType());
+      auto allocOp = memref::AllocOp::create(rewriter, loc, memType);
+      auto c0 = arith::ConstantIndexOp::create(rewriter, loc, 0);
+      auto storeOp =
+          vector::StoreOp::create(rewriter, loc, rewriter.getRemappedValue(arg),
+                                  allocOp.getResult(), c0.getResult());
+
+      // TODO: convert to unranked memref first? depends on how i will implement the runtime
+      cpu::PrintOp::create(rewriter, loc, op.getStr(), allocOp.getResult());
+    }
+
+    rewriter.eraseOp(op);
     return success();
   }
 };
