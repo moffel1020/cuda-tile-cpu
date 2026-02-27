@@ -14,8 +14,12 @@ def CudaTileCPU_PrintOp : CudaTileCPU_Op<"print"> {
     Like cuda tile PrintOp, but it accepts memref as operand type.
   }];
 
-  let arguments = (ins StrAttr:$prefix, 
+  let arguments = (ins StrAttr:$str, 
     Variadic<AnyTypeOf<[AnyRankedOrUnrankedMemRef]>>:$args);
+
+  let assemblyFormat = [{
+    $str (`,` $args^)? attr-dict (`:` type($args)^)?
+  }];
 }
 
 #endif
