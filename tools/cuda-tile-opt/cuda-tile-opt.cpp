@@ -12,6 +12,7 @@
 #include "mlir/Transforms/Passes.h"
 
 #include "cuda_tile/Dialect/CudaTile/Transforms/Passes.h"
+#include "cuda_tile_cpu/Conversion/CudaTileCPUToLLVM/Passes.h"
 #include "cuda_tile_cpu/Conversion/CudaTileToStandard/Passes.h"
 #include "cuda_tile_cpu/Dialect/CudaTileCPU/IR/Dialect.h"
 
@@ -26,6 +27,7 @@ int main(int argc, char **argv) {
   mlir::cuda_tile::registerCudaTilePasses();
 
   mlir::cuda_tile::cpu::registerCudaTileToStandardPasses();
+  mlir::cuda_tile::cpu::registerCudaTileCPUToLLVMPasses();
 
   return mlir::asMainReturnCode(
       mlir::MlirOptMain(argc, argv, "CudaTile test driver\n", registry));

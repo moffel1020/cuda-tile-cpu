@@ -163,8 +163,6 @@ struct ConvertCudaTilePrint : public OpConversionPattern<cuda_tile::PrintOp> {
   matchAndRewrite(cuda_tile::PrintOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
 
-    // TODO: emit function calls when going to llvm
-
     if (op.getNumOperands() == 0) {
       auto cpuPrint =
           cpu::PrintOp::create(rewriter, op.getLoc(), op.getStr(), {});
@@ -174,8 +172,7 @@ struct ConvertCudaTilePrint : public OpConversionPattern<cuda_tile::PrintOp> {
 
     for (auto arg : op.getArgs()) {
       if (!isa<TileType>(arg.getType())) {
-        llvm_unreachable("unimplemented print type");
-        return failure();
+        return rewriter.notifyMatchFailure(op, "print operands should be tiles");
       }
 
       // store the vector arg in a memref to call print
@@ -241,22 +238,21 @@ struct ConvertCudaTileToStandard
     RewritePatternSet patterns(context);
     patterns.add<ConvertEntryToFunc, ConvertCudaTileReturn,
                  ConvertCudaTileConstant, ConvertCudaTileAddi,
-                 ConvertCudaTilePrint /*, MoveOutOfCudaTileModule*/>(
+                 ConvertCudaTilePrint, MoveOutOfCudaTileModule>(
         typeConverter, context);
 
     target.addIllegalDialect<CudaTileDialect>();
     target.addLegalDialect<arith::ArithDialect, func::FuncDialect,
                            memref::MemRefDialect, vector::VectorDialect,
                            cuda_tile::cpu::CudaTileCPUDialect>();
-    target.addLegalOp<cuda_tile::ModuleOp>();
 
-    // populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(
-    //     patterns, typeConverter);
+    populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(
+        patterns, typeConverter);
 
-    // target.addDynamicallyLegalOp<func::FuncOp>([&](func::FuncOp op) {
-    //   return typeConverter.isSignatureLegal(op.getFunctionType()) &&
-    //          typeConverter.isLegal(&op.getBody());
-    // });
+    target.addDynamicallyLegalOp<func::FuncOp>([&](func::FuncOp op) {
+      return typeConverter.isSignatureLegal(op.getFunctionType()) &&
+             typeConverter.isLegal(&op.getBody());
+    });
 
     if (failed(applyPartialConversion(mod, target, std::move(patterns)))) {
       signalPassFailure();

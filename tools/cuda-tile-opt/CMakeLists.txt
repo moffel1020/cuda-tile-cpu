@@ -17,6 +17,7 @@ set(LIBS
 
   CudaTileCPUDialect
   CudaTileToStandard
+  CudaTileCPUToLLVM
   )
 
 add_mlir_tool(cuda-tile-opt
