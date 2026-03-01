@@ -182,14 +182,16 @@ struct ConvertCudaTilePrint : public OpConversionPattern<cuda_tile::PrintOp> {
       auto loc = op.getLoc();
       auto tile = cast<TileType>(arg.getType());
       auto memType = MemRefType::get(tile.getShape(), tile.getElementType());
+      auto unrankedMem = UnrankedMemRefType::get(tile.getElementType(), {});
+
       auto allocOp = memref::AllocOp::create(rewriter, loc, memType);
       auto c0 = arith::ConstantIndexOp::create(rewriter, loc, 0);
       auto storeOp =
           vector::StoreOp::create(rewriter, loc, rewriter.getRemappedValue(arg),
                                   allocOp.getResult(), c0.getResult());
-
-      // TODO: convert to unranked memref first? depends on how i will implement the runtime
-      cpu::PrintOp::create(rewriter, loc, op.getStr(), allocOp.getResult());
+      auto castOp = memref::CastOp::create(rewriter, op.getLoc(), unrankedMem,
+                                           allocOp.getResult());
+      cpu::PrintOp::create(rewriter, loc, op.getStr(), castOp.getResult());
     }
 
     rewriter.eraseOp(op);

@@ -15,7 +15,7 @@ def CudaTileCPU_PrintOp : CudaTileCPU_Op<"print"> {
   }];
 
   let arguments = (ins StrAttr:$str, 
-    Variadic<AnyTypeOf<[AnyRankedOrUnrankedMemRef]>>:$args);
+    Variadic<AnyTypeOf<[AnyUnrankedMemRef]>>:$args);
 
   let assemblyFormat = [{
     $str (`,` $args^)? attr-dict (`:` type($args)^)?
