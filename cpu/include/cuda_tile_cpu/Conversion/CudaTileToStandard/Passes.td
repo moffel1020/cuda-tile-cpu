@@ -5,8 +5,6 @@ include "mlir/Pass/PassBase.td"
 
 def ConvertCudaTileToStandard : Pass<"convert-cuda-tile-to-standard", "mlir::ModuleOp"> {
   let summary = "Convert cuda tile to standard dialects";
-  let description = [{
-  }];
 
   let constructor = "mlir::cuda_tile::cpu::createConvertCudaTileToStandard()";
   let dependentDialects = ["mlir::cuda_tile::CudaTileDialect",
