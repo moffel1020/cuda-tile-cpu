@@ -170,9 +170,13 @@ struct ConvertCudaTilePrint : public OpConversionPattern<cuda_tile::PrintOp> {
       return success();
     }
 
-    for (auto arg : op.getArgs()) {
+    SmallVector<StringRef> splitStrings = splitFormatString(op.getStr());
+    assert(splitStrings.size() >= op.getNumOperands());
+
+    for (auto [arg, str] : llvm::zip(op.getArgs(), splitStrings)) {
       if (!isa<TileType>(arg.getType())) {
-        return rewriter.notifyMatchFailure(op, "print operands should be tiles");
+        return rewriter.notifyMatchFailure(op,
+                                           "print operands should be tiles");
       }
 
       // store the vector arg in a memref to call print
@@ -183,16 +187,61 @@ struct ConvertCudaTilePrint : public OpConversionPattern<cuda_tile::PrintOp> {
 
       auto allocOp = memref::AllocOp::create(rewriter, loc, memType);
       auto c0 = arith::ConstantIndexOp::create(rewriter, loc, 0);
+
+      SmallVector<Value> indices(tile.getRank(), c0);
       auto storeOp =
           vector::StoreOp::create(rewriter, loc, rewriter.getRemappedValue(arg),
-                                  allocOp.getResult(), c0.getResult());
+                                  allocOp.getResult(), indices);
       auto castOp = memref::CastOp::create(rewriter, op.getLoc(), unrankedMem,
                                            allocOp.getResult());
-      cpu::PrintOp::create(rewriter, loc, op.getStr(), castOp.getResult());
+
+      cpu::PrintOp::create(rewriter, loc, str, castOp.getResult());
+    }
+
+    if (op.getNumOperands() < splitStrings.size() &&
+        splitStrings.back() != "") {
+      cpu::PrintOp::create(rewriter, op.getLoc(), splitStrings.back(), {});
     }
 
     rewriter.eraseOp(op);
     return success();
+  }
+
+private:
+  // split strings at format, do not include the format specifier itself
+  static SmallVector<StringRef, 8> splitFormatString(StringRef str) {
+    SmallVector<StringRef, 8> str_splits;
+
+    size_t pos = 0;
+    size_t start = 0;
+
+    while (pos < str.size()) {
+      if (str[pos] != '%') {
+        ++pos;
+        continue;
+      }
+
+      if (pos + 1 < str.size() && str[pos + 1] == '%') {
+        pos += 2;
+        continue;
+      }
+
+      str_splits.push_back(str.slice(start, pos));
+      ++pos;
+
+      while (pos < str.size() && !StringRef("df").contains(str[pos])) {
+        ++pos;
+      }
+
+      if (pos < str.size()) {
+        ++pos;
+      }
+
+      start = pos;
+    }
+
+    str_splits.push_back(str.slice(start, str.size()));
+    return str_splits;
   }
 };
 
@@ -238,8 +287,8 @@ struct ConvertCudaTileToStandard
     RewritePatternSet patterns(context);
     patterns.add<ConvertEntryToFunc, ConvertCudaTileReturn,
                  ConvertCudaTileConstant, ConvertCudaTileAddi,
-                 ConvertCudaTilePrint, MoveOutOfCudaTileModule>(
-        typeConverter, context);
+                 ConvertCudaTilePrint, MoveOutOfCudaTileModule>(typeConverter,
+                                                                context);
 
     target.addIllegalDialect<CudaTileDialect>();
     target.addLegalDialect<arith::ArithDialect, func::FuncDialect,

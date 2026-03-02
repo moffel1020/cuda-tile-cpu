@@ -8,17 +8,12 @@ class CudaTileCPU_Op<string mnemonic, list<Trait> traits = []> :
   Op<CudaTileCPU_Dialect, mnemonic, !listconcat(traits, [])> {}
 
 def CudaTileCPU_PrintOp : CudaTileCPU_Op<"print"> {
-  let summary = "Print a formatted string";
+  let summary = "Print a string with optional unranked memref at the end";
 
-  let description = [{
-    Like cuda tile PrintOp, but it accepts memref as operand type.
-  }];
-
-  let arguments = (ins StrAttr:$str, 
-    Variadic<AnyTypeOf<[AnyUnrankedMemRef]>>:$args);
+  let arguments = (ins StrAttr:$str, Optional<AnyUnrankedMemRef>:$value);
 
   let assemblyFormat = [{
-    $str (`,` $args^)? attr-dict (`:` type($args)^)?
+    $str (`,` $value^)? attr-dict (`:` type($value)^)?
   }];
 }
 
