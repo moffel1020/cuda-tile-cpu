@@ -121,11 +121,12 @@ struct ConvertCudaTileConstant
   }
 };
 
-struct ConvertCudaTileAddi : public OpConversionPattern<cuda_tile::AddIOp> {
-  using OpConversionPattern<cuda_tile::AddIOp>::OpConversionPattern;
+template <typename T, typename U>
+struct ConvertBinaryIntArith : public OpConversionPattern<T> {
+  using OpConversionPattern<T>::OpConversionPattern;
 
   LogicalResult
-  matchAndRewrite(cuda_tile::AddIOp op, OpAdaptor adaptor,
+  matchAndRewrite(T op, typename T::Adaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
 
     auto overflow = std::invoke(
@@ -151,10 +152,17 @@ struct ConvertCudaTileAddi : public OpConversionPattern<cuda_tile::AddIOp> {
     auto left = adaptor.getLhs();
     auto right = adaptor.getRhs();
 
-    rewriter.replaceOpWithNewOp<arith::AddIOp>(op, left, right, overflow);
+    rewriter.replaceOpWithNewOp<U>(op, left, right, overflow);
     return success();
   }
 };
+
+using ConvertCudaTileAddI =
+    ConvertBinaryIntArith<cuda_tile::AddIOp, arith::AddIOp>;
+using ConvertCudaTileSubI =
+    ConvertBinaryIntArith<cuda_tile::SubIOp, arith::SubIOp>;
+using ConvertCudaTileMulI =
+    ConvertBinaryIntArith<cuda_tile::MulIOp, arith::MulIOp>;
 
 struct ConvertCudaTilePrint : public OpConversionPattern<cuda_tile::PrintOp> {
   using OpConversionPattern<cuda_tile::PrintOp>::OpConversionPattern;
@@ -285,10 +293,11 @@ struct ConvertCudaTileToStandard
     CudaTileTypeConverter typeConverter;
 
     RewritePatternSet patterns(context);
-    patterns.add<ConvertEntryToFunc, ConvertCudaTileReturn,
-                 ConvertCudaTileConstant, ConvertCudaTileAddi,
-                 ConvertCudaTilePrint, MoveOutOfCudaTileModule>(typeConverter,
-                                                                context);
+    patterns
+        .add<ConvertEntryToFunc, ConvertCudaTileReturn, ConvertCudaTileConstant,
+             ConvertCudaTileAddI, ConvertCudaTileSubI, ConvertCudaTileMulI,
+             ConvertCudaTilePrint, MoveOutOfCudaTileModule>(typeConverter,
+                                                            context);
 
     target.addIllegalDialect<CudaTileDialect>();
     target.addLegalDialect<arith::ArithDialect, func::FuncDialect,
