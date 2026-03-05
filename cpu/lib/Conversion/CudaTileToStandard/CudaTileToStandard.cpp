@@ -185,6 +185,8 @@ using ConvertCudaTileSubI =
     ConvertBinaryIntOverflowOp<cuda_tile::SubIOp, arith::SubIOp>;
 using ConvertCudaTileMulI =
     ConvertBinaryIntOverflowOp<cuda_tile::MulIOp, arith::MulIOp>;
+using ConvertCudaTileShLI =
+    ConvertBinaryIntOverflowOp<cuda_tile::ShLIOp, arith::ShLIOp>;
 
 struct ConvertCudaTilePrint : public OpConversionPattern<cuda_tile::PrintOp> {
   using OpConversionPattern<cuda_tile::PrintOp>::OpConversionPattern;
@@ -315,12 +317,12 @@ struct ConvertCudaTileToStandard
     CudaTileTypeConverter typeConverter;
 
     RewritePatternSet patterns(context);
-    patterns
-        .add<ConvertEntryToFunc, ConvertCudaTileReturn, ConvertCudaTileConstant,
-             ConvertCudaTileAddI, ConvertCudaTileSubI, ConvertCudaTileMulI,
-             ConvertCudaTileOrI, ConvertCudaTileXOrI, ConvertCudaTileAndI,
-             ConvertCudaTilePrint, MoveOutOfCudaTileModule>(typeConverter,
-                                                            context);
+    patterns.add<ConvertEntryToFunc, ConvertCudaTileReturn,
+                 ConvertCudaTileConstant, ConvertCudaTileAddI,
+                 ConvertCudaTileSubI, ConvertCudaTileMulI, ConvertCudaTileShLI,
+                 ConvertCudaTileOrI, ConvertCudaTileXOrI, ConvertCudaTileAndI,
+                 ConvertCudaTilePrint, MoveOutOfCudaTileModule>(typeConverter,
+                                                                context);
 
     target.addIllegalDialect<CudaTileDialect>();
     target.addLegalDialect<arith::ArithDialect, func::FuncDialect,
