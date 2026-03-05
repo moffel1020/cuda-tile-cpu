@@ -122,7 +122,29 @@ struct ConvertCudaTileConstant
 };
 
 template <typename T, typename U>
-struct ConvertBinaryIntArith : public OpConversionPattern<T> {
+struct ConvertBinaryBitwiseOp : public OpConversionPattern<T> {
+  using OpConversionPattern<T>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(T op, typename T::Adaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+
+    auto left = adaptor.getLhs();
+    auto right = adaptor.getRhs();
+    rewriter.replaceOpWithNewOp<U>(op, left, right);
+    return success();
+  }
+};
+
+using ConvertCudaTileOrI =
+    ConvertBinaryBitwiseOp<cuda_tile::OrIOp, arith::OrIOp>;
+using ConvertCudaTileXOrI =
+    ConvertBinaryBitwiseOp<cuda_tile::XOrIOp, arith::XOrIOp>;
+using ConvertCudaTileAndI =
+    ConvertBinaryBitwiseOp<cuda_tile::AndIOp, arith::AndIOp>;
+
+template <typename T, typename U>
+struct ConvertBinaryIntOverflowOp : public OpConversionPattern<T> {
   using OpConversionPattern<T>::OpConversionPattern;
 
   LogicalResult
@@ -158,11 +180,11 @@ struct ConvertBinaryIntArith : public OpConversionPattern<T> {
 };
 
 using ConvertCudaTileAddI =
-    ConvertBinaryIntArith<cuda_tile::AddIOp, arith::AddIOp>;
+    ConvertBinaryIntOverflowOp<cuda_tile::AddIOp, arith::AddIOp>;
 using ConvertCudaTileSubI =
-    ConvertBinaryIntArith<cuda_tile::SubIOp, arith::SubIOp>;
+    ConvertBinaryIntOverflowOp<cuda_tile::SubIOp, arith::SubIOp>;
 using ConvertCudaTileMulI =
-    ConvertBinaryIntArith<cuda_tile::MulIOp, arith::MulIOp>;
+    ConvertBinaryIntOverflowOp<cuda_tile::MulIOp, arith::MulIOp>;
 
 struct ConvertCudaTilePrint : public OpConversionPattern<cuda_tile::PrintOp> {
   using OpConversionPattern<cuda_tile::PrintOp>::OpConversionPattern;
@@ -296,6 +318,7 @@ struct ConvertCudaTileToStandard
     patterns
         .add<ConvertEntryToFunc, ConvertCudaTileReturn, ConvertCudaTileConstant,
              ConvertCudaTileAddI, ConvertCudaTileSubI, ConvertCudaTileMulI,
+             ConvertCudaTileOrI, ConvertCudaTileXOrI, ConvertCudaTileAndI,
              ConvertCudaTilePrint, MoveOutOfCudaTileModule>(typeConverter,
                                                             context);
 
