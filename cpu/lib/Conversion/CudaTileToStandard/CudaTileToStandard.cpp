@@ -142,6 +142,52 @@ struct ConvertCudaTileIota : public OpConversionPattern<cuda_tile::IotaOp> {
   }
 };
 
+struct ConvertCudaTileBroadcast
+    : public OpConversionPattern<cuda_tile::BroadcastOp> {
+
+  using OpConversionPattern<cuda_tile::BroadcastOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(cuda_tile::BroadcastOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+
+    auto newVec = getTypeConverter()->convertType(op.getResult());
+    rewriter.replaceOpWithNewOp<vector::BroadcastOp>(op, newVec,
+                                                     adaptor.getSource());
+    return success();
+  }
+};
+
+struct ConvertCudaTileReshape
+    : public OpConversionPattern<cuda_tile::ReshapeOp> {
+  using OpConversionPattern<cuda_tile::ReshapeOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(cuda_tile::ReshapeOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+
+    auto opType = op.getType();
+    auto src = adaptor.getSource();
+
+    // we convert tile<!cuda_tile.ptr<_>> to just a !ptr.ptr so to convert
+    // !ptr.ptr to vector<1xptr> would be a broadcast instead of a reshape
+    if (isa<ptr::PtrType>(src.getType())) {
+      auto vecType = VectorType::get(opType.getShape(), src.getType());
+      rewriter.replaceOpWithNewOp<vector::BroadcastOp>(op, vecType, src);
+      return success();
+    }
+
+    if (!isa<VectorType>(src.getType())) {
+      return failure();
+    }
+
+    auto vecType = VectorType::get(opType.getShape(), opType.getElementType());
+    rewriter.replaceOpWithNewOp<vector::ShapeCastOp>(op, vecType,
+                                                     adaptor.getSource());
+    return success();
+  }
+};
+
 template <typename T, typename U>
 struct ConvertBinaryBitwiseOp : public OpConversionPattern<T> {
   using OpConversionPattern<T>::OpConversionPattern;
@@ -242,6 +288,8 @@ struct ConvertCudaTilePrint : public OpConversionPattern<cuda_tile::PrintOp> {
       auto c0 = arith::ConstantIndexOp::create(rewriter, loc, 0);
 
       SmallVector<Value> indices(tile.getRank(), c0);
+      // TODO: vectors of higher rank than 1 do not lower to llvm
+      // they should be linearized  before that
       auto storeOp =
           vector::StoreOp::create(rewriter, loc, rewriter.getRemappedValue(arg),
                                   allocOp.getResult(), indices);
@@ -340,7 +388,8 @@ struct ConvertCudaTileToStandard
     RewritePatternSet patterns(context);
     patterns
         .add<ConvertEntryToFunc, ConvertCudaTileReturn, ConvertCudaTileConstant,
-             ConvertCudaTileIota, ConvertCudaTileAddI, ConvertCudaTileSubI,
+             ConvertCudaTileIota, ConvertCudaTileReshape,
+             ConvertCudaTileBroadcast, ConvertCudaTileAddI, ConvertCudaTileSubI,
              ConvertCudaTileMulI, ConvertCudaTileShLI, ConvertCudaTileOrI,
              ConvertCudaTileXOrI, ConvertCudaTileAndI, ConvertCudaTilePrint,
              MoveOutOfCudaTileModule>(typeConverter, context);
