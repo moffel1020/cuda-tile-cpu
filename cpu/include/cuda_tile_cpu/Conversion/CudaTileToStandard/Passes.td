@@ -13,6 +13,7 @@ def ConvertCudaTileToStandard : Pass<"convert-cuda-tile-to-standard", "mlir::Mod
                            "mlir::vector::VectorDialect",
                            "mlir::scf::SCFDialect",
                            "mlir::memref::MemRefDialect",
+                           "mlir::ptr::PtrDialect",
                            "mlir::func::FuncDialect"];
 }
 

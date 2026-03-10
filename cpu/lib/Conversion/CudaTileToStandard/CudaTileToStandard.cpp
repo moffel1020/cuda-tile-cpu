@@ -5,9 +5,10 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/Ptr/IR/PtrDialect.h"
+#include "mlir/Dialect/Ptr/IR/PtrOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
-#include "mlir/IR/BuiltinDialect.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
 
@@ -38,7 +39,7 @@ public:
     addConversion([&](cuda_tile::TileType type) -> Type {
       if (auto ptrType =
               dyn_cast<cuda_tile::PointerType>(type.getElementType())) {
-        return convertPtrTileToMemref(ptrType);
+        return convertCudaTilePtrToPtr(ptrType);
       }
 
       return convertTileToVector(type);
@@ -53,9 +54,8 @@ private:
     return VectorType::get(shape, elementType);
   }
 
-  Type convertPtrTileToMemref(cuda_tile::PointerType ptrType) const {
-    auto pointee = ptrType.getPointeeType();
-    return MemRefType::get({ShapedType::kDynamic}, pointee);
+  Type convertCudaTilePtrToPtr(cuda_tile::PointerType ptrType) const {
+    return ptr::PtrType::get(ptr::GenericSpaceAttr::get(ptrType.getContext()));
   }
 };
 
@@ -103,11 +103,7 @@ struct ConvertCudaTileConstant
 
     auto oldType = op.getResult().getType();
     auto vecType =
-        dyn_cast<VectorType>(getTypeConverter()->convertType(oldType));
-
-    if (!vecType) {
-      return failure();
-    }
+        VectorType::get(oldType.getShape(), oldType.getElementType());
 
     auto oldAttr = dyn_cast<DenseElementsAttr>(op.getValueAttr());
     if (!oldAttr) {
@@ -116,6 +112,31 @@ struct ConvertCudaTileConstant
 
     auto newAttr = oldAttr.reshape(vecType);
     rewriter.replaceOpWithNewOp<arith::ConstantOp>(op, vecType, newAttr);
+
+    return success();
+  }
+};
+
+struct ConvertCudaTileIota : public OpConversionPattern<cuda_tile::IotaOp> {
+  using OpConversionPattern<cuda_tile::IotaOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(cuda_tile::IotaOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+
+    auto opType = op.getResult().getType();
+    auto shape = opType.getShape();
+    if (shape.size() != 1) {
+      return rewriter.notifyMatchFailure(op, "1d shape expected for iota op");
+    }
+
+    auto width = opType.getElementType().getIntOrFloatBitWidth();
+    SmallVector<APInt> indices(opType.getNumElements());
+    std::iota(indices.begin(), indices.end(), APInt(width, 0));
+
+    auto vecType = VectorType::get(shape, opType.getElementType());
+    rewriter.replaceOpWithNewOp<arith::ConstantOp>(
+        op, DenseElementsAttr::get(vecType, indices));
 
     return success();
   }
@@ -317,17 +338,18 @@ struct ConvertCudaTileToStandard
     CudaTileTypeConverter typeConverter;
 
     RewritePatternSet patterns(context);
-    patterns.add<ConvertEntryToFunc, ConvertCudaTileReturn,
-                 ConvertCudaTileConstant, ConvertCudaTileAddI,
-                 ConvertCudaTileSubI, ConvertCudaTileMulI, ConvertCudaTileShLI,
-                 ConvertCudaTileOrI, ConvertCudaTileXOrI, ConvertCudaTileAndI,
-                 ConvertCudaTilePrint, MoveOutOfCudaTileModule>(typeConverter,
-                                                                context);
+    patterns
+        .add<ConvertEntryToFunc, ConvertCudaTileReturn, ConvertCudaTileConstant,
+             ConvertCudaTileIota, ConvertCudaTileAddI, ConvertCudaTileSubI,
+             ConvertCudaTileMulI, ConvertCudaTileShLI, ConvertCudaTileOrI,
+             ConvertCudaTileXOrI, ConvertCudaTileAndI, ConvertCudaTilePrint,
+             MoveOutOfCudaTileModule>(typeConverter, context);
 
     target.addIllegalDialect<CudaTileDialect>();
-    target.addLegalDialect<arith::ArithDialect, func::FuncDialect,
-                           memref::MemRefDialect, vector::VectorDialect,
-                           cuda_tile::cpu::CudaTileCPUDialect>();
+    target
+        .addLegalDialect<arith::ArithDialect, func::FuncDialect,
+                         memref::MemRefDialect, vector::VectorDialect,
+                         ptr::PtrDialect, cuda_tile::cpu::CudaTileCPUDialect>();
 
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(
         patterns, typeConverter);
