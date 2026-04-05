@@ -45,12 +45,12 @@ public:
       //         dyn_cast<cuda_tile::PointerType>(type.getElementType())) {
       //   return convertCudaTilePtrToPtr(ptrType);
       // }
-      return convertTileToVector(type);
+      return convertTileToTensor(type);
     });
   }
 
 private:
-  Type convertTileToVector(cuda_tile::TileType type) const {
+  Type convertTileToTensor(cuda_tile::TileType type) const {
     auto shape = type.getShape();
     Type elementType = type.getElementType();
     return RankedTensorType::get(shape, elementType);
@@ -192,29 +192,37 @@ struct ConvertCudaTileReshape
 };
 
 template <typename T, typename U>
-struct ConvertBinaryBitwiseOp : public OpConversionPattern<T> {
+struct ConvertBinaryOpWithMap : public OpConversionPattern<T> {
   using OpConversionPattern<T>::OpConversionPattern;
 
   LogicalResult
   matchAndRewrite(T op, typename T::Adaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
 
-    auto left = adaptor.getLhs();
-    auto right = adaptor.getRhs();
-    rewriter.replaceOpWithNewOp<U>(op, left, right);
+    auto opTy = op.getType();
+    auto empty = tensor::EmptyOp::create(rewriter, op.getLoc(), opTy.getShape(),
+                                         opTy.getElementType());
+    auto mapOp = linalg::MapOp::create(
+        rewriter, op.getLoc(), adaptor.getOperands(), empty,
+        [](OpBuilder &b, Location loc, ValueRange args) {
+          auto newOp = U::create(b, loc, args.take_front(2));
+          linalg::YieldOp::create(b, loc, newOp.getResult());
+        });
+
+    rewriter.replaceOp(op, mapOp);
     return success();
   }
 };
 
 using ConvertCudaTileOrI =
-    ConvertBinaryBitwiseOp<cuda_tile::OrIOp, arith::OrIOp>;
+    ConvertBinaryOpWithMap<cuda_tile::OrIOp, arith::OrIOp>;
 using ConvertCudaTileXOrI =
-    ConvertBinaryBitwiseOp<cuda_tile::XOrIOp, arith::XOrIOp>;
+    ConvertBinaryOpWithMap<cuda_tile::XOrIOp, arith::XOrIOp>;
 using ConvertCudaTileAndI =
-    ConvertBinaryBitwiseOp<cuda_tile::AndIOp, arith::AndIOp>;
+    ConvertBinaryOpWithMap<cuda_tile::AndIOp, arith::AndIOp>;
 
 template <typename T, typename U>
-struct ConvertCudaTileArith : public OpConversionPattern<T> {
+struct ConvertArithOp : public OpConversionPattern<T> {
   using OpConversionPattern<T>::OpConversionPattern;
 
   LogicalResult
@@ -232,12 +240,9 @@ struct ConvertCudaTileArith : public OpConversionPattern<T> {
 
 // TODO: ignoring overflow hints here, could we use them by using linalg map?
 // in addition to these, ShLI also has int overflow flag
-using ConvertCudaTileAddI =
-    ConvertCudaTileArith<cuda_tile::AddIOp, linalg::AddOp>;
-using ConvertCudaTileSubI =
-    ConvertCudaTileArith<cuda_tile::SubIOp, linalg::SubOp>;
-using ConvertCudaTileMulI =
-    ConvertCudaTileArith<cuda_tile::MulIOp, linalg::MulOp>;
+using ConvertCudaTileAddI = ConvertArithOp<cuda_tile::AddIOp, linalg::AddOp>;
+using ConvertCudaTileSubI = ConvertArithOp<cuda_tile::SubIOp, linalg::SubOp>;
+using ConvertCudaTileMulI = ConvertArithOp<cuda_tile::MulIOp, linalg::MulOp>;
 
 struct ConvertCudaTilePrint : public OpConversionPattern<cuda_tile::PrintOp> {
   using OpConversionPattern<cuda_tile::PrintOp>::OpConversionPattern;
