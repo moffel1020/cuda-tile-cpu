@@ -3,6 +3,7 @@
 #include "cuda_tile_cpu/Dialect/CudaTileCPU/IR/Dialect.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
@@ -11,6 +12,7 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
+#include "mlir/IR/BuiltinTypes.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
 
@@ -39,11 +41,10 @@ public:
     addConversion([](Type type) { return type; });
 
     addConversion([&](cuda_tile::TileType type) -> Type {
-      if (auto ptrType =
-              dyn_cast<cuda_tile::PointerType>(type.getElementType())) {
-        return convertCudaTilePtrToPtr(ptrType);
-      }
-
+      // if (auto ptrType =
+      //         dyn_cast<cuda_tile::PointerType>(type.getElementType())) {
+      //   return convertCudaTilePtrToPtr(ptrType);
+      // }
       return convertTileToVector(type);
     });
   }
@@ -52,13 +53,13 @@ private:
   Type convertTileToVector(cuda_tile::TileType type) const {
     auto shape = type.getShape();
     Type elementType = type.getElementType();
-
-    return VectorType::get(shape, elementType);
+    return RankedTensorType::get(shape, elementType);
   }
 
-  Type convertCudaTilePtrToPtr(cuda_tile::PointerType ptrType) const {
-    return ptr::PtrType::get(ptr::GenericSpaceAttr::get(ptrType.getContext()));
-  }
+  // Type convertCudaTilePtrToPtr(cuda_tile::PointerType ptrType) const {
+  //   return
+  //   ptr::PtrType::get(ptr::GenericSpaceAttr::get(ptrType.getContext()));
+  // }
 };
 
 struct ConvertEntryToFunc : public OpConversionPattern<cuda_tile::EntryOp> {
@@ -104,16 +105,16 @@ struct ConvertCudaTileConstant
                   ConversionPatternRewriter &rewriter) const override {
 
     auto oldType = op.getResult().getType();
-    auto vecType =
-        VectorType::get(oldType.getShape(), oldType.getElementType());
+    auto tensorType =
+        RankedTensorType::get(oldType.getShape(), oldType.getElementType());
 
     auto oldAttr = dyn_cast<DenseElementsAttr>(op.getValueAttr());
     if (!oldAttr) {
       return failure();
     }
 
-    auto newAttr = oldAttr.reshape(vecType);
-    rewriter.replaceOpWithNewOp<arith::ConstantOp>(op, vecType, newAttr);
+    auto newAttr = oldAttr.reshape(tensorType);
+    rewriter.replaceOpWithNewOp<arith::ConstantOp>(op, tensorType, newAttr);
 
     return success();
   }
@@ -286,17 +287,11 @@ struct ConvertCudaTilePrint : public OpConversionPattern<cuda_tile::PrintOp> {
       auto memType = MemRefType::get(tile.getShape(), tile.getElementType());
       auto unrankedMem = UnrankedMemRefType::get(tile.getElementType(), {});
 
-      auto allocOp = memref::AllocOp::create(rewriter, loc, memType);
-      auto c0 = arith::ConstantIndexOp::create(rewriter, loc, 0);
-
-      SmallVector<Value> indices(tile.getRank(), c0);
-      // TODO: vectors of higher rank than 1 do not lower to llvm
-      // they should be linearized  before that
-      auto storeOp =
-          vector::StoreOp::create(rewriter, loc, rewriter.getRemappedValue(arg),
-                                  allocOp.getResult(), indices);
-      auto castOp = memref::CastOp::create(rewriter, op.getLoc(), unrankedMem,
-                                           allocOp.getResult());
+      auto bufferizeOp = bufferization::ToBufferOp::create(
+          rewriter, loc, memType, rewriter.getRemappedValue(arg),
+          /*read_only=*/true);
+      auto castOp = memref::CastOp::create(rewriter, loc, unrankedMem,
+                                           bufferizeOp.getResult());
 
       cpu::PrintOp::create(rewriter, loc, str, castOp.getResult());
     }
@@ -397,10 +392,10 @@ struct ConvertCudaTileToStandard
              MoveOutOfCudaTileModule>(typeConverter, context);
 
     target.addIllegalDialect<CudaTileDialect>();
-    target
-        .addLegalDialect<arith::ArithDialect, func::FuncDialect,
-                         memref::MemRefDialect, vector::VectorDialect,
-                         ptr::PtrDialect, cuda_tile::cpu::CudaTileCPUDialect>();
+    target.addLegalDialect<arith::ArithDialect, func::FuncDialect,
+                           memref::MemRefDialect, vector::VectorDialect,
+                           bufferization::BufferizationDialect, ptr::PtrDialect,
+                           cuda_tile::cpu::CudaTileCPUDialect>();
 
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(
         patterns, typeConverter);
