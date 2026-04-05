@@ -7,6 +7,8 @@ target_link_libraries(cuda-tile-lsp PRIVATE
   CudaTileCPUDialect
   CudaTileToStandard
   MLIRVectorDialect
+  MLIRTensorDialect
+  MLIRLinalgDialect
   MLIRSCFDialect
   MLIRFuncDialect
   MLIRArithDialect
