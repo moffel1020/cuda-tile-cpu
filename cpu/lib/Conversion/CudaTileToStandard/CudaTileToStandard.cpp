@@ -214,49 +214,30 @@ using ConvertCudaTileAndI =
     ConvertBinaryBitwiseOp<cuda_tile::AndIOp, arith::AndIOp>;
 
 template <typename T, typename U>
-struct ConvertBinaryIntOverflowOp : public OpConversionPattern<T> {
+struct ConvertCudaTileArith : public OpConversionPattern<T> {
   using OpConversionPattern<T>::OpConversionPattern;
 
   LogicalResult
   matchAndRewrite(T op, typename T::Adaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-
-    auto overflow = std::invoke(
-        [](auto ctOverflow) {
-          using aro = arith::IntegerOverflowFlags;
-          using cto = cuda_tile::IntegerOverflow;
-
-          switch (ctOverflow) {
-          case cto::NONE:
-            return aro::none;
-          case cto::NSW:
-            return aro::nsw;
-          case cto::NUW:
-            return aro::nuw;
-          case cto::NW:
-            return aro::nsw | aro::nuw;
-          default:
-            return aro::none;
-          }
-        },
-        op.getOverflow());
-
-    auto left = adaptor.getLhs();
-    auto right = adaptor.getRhs();
-
-    rewriter.replaceOpWithNewOp<U>(op, left, right, overflow);
+    auto res = op.getResult().getType();
+    auto opTy = op.getType();
+    auto empty = tensor::EmptyOp::create(rewriter, op.getLoc(), opTy.getShape(),
+                                         opTy.getElementType());
+    rewriter.replaceOpWithNewOp<U>(op, adaptor.getOperands(),
+                                   empty.getResult());
     return success();
   }
 };
 
+// TODO: ignoring overflow hints here, could we use them by using linalg map?
+// in addition to these, ShLI also has int overflow flag
 using ConvertCudaTileAddI =
-    ConvertBinaryIntOverflowOp<cuda_tile::AddIOp, arith::AddIOp>;
+    ConvertCudaTileArith<cuda_tile::AddIOp, linalg::AddOp>;
 using ConvertCudaTileSubI =
-    ConvertBinaryIntOverflowOp<cuda_tile::SubIOp, arith::SubIOp>;
+    ConvertCudaTileArith<cuda_tile::SubIOp, linalg::SubOp>;
 using ConvertCudaTileMulI =
-    ConvertBinaryIntOverflowOp<cuda_tile::MulIOp, arith::MulIOp>;
-using ConvertCudaTileShLI =
-    ConvertBinaryIntOverflowOp<cuda_tile::ShLIOp, arith::ShLIOp>;
+    ConvertCudaTileArith<cuda_tile::MulIOp, linalg::MulOp>;
 
 struct ConvertCudaTilePrint : public OpConversionPattern<cuda_tile::PrintOp> {
   using OpConversionPattern<cuda_tile::PrintOp>::OpConversionPattern;
@@ -383,19 +364,20 @@ struct ConvertCudaTileToStandard
     CudaTileTypeConverter typeConverter;
 
     RewritePatternSet patterns(context);
-    patterns
-        .add<ConvertEntryToFunc, ConvertCudaTileReturn, ConvertCudaTileConstant,
-             ConvertCudaTileIota, ConvertCudaTileReshape,
-             ConvertCudaTileBroadcast, ConvertCudaTileAddI, ConvertCudaTileSubI,
-             ConvertCudaTileMulI, ConvertCudaTileShLI, ConvertCudaTileOrI,
-             ConvertCudaTileXOrI, ConvertCudaTileAndI, ConvertCudaTilePrint,
-             MoveOutOfCudaTileModule>(typeConverter, context);
+    patterns.add<ConvertEntryToFunc, ConvertCudaTileReturn,
+                 ConvertCudaTileConstant, ConvertCudaTileIota,
+                 ConvertCudaTileReshape, ConvertCudaTileBroadcast,
+                 ConvertCudaTileAddI, ConvertCudaTileSubI, ConvertCudaTileMulI,
+                 ConvertCudaTileOrI, ConvertCudaTileXOrI, ConvertCudaTileAndI,
+                 ConvertCudaTilePrint, MoveOutOfCudaTileModule>(typeConverter,
+                                                                context);
 
     target.addIllegalDialect<CudaTileDialect>();
-    target.addLegalDialect<arith::ArithDialect, func::FuncDialect,
-                           memref::MemRefDialect, vector::VectorDialect,
-                           bufferization::BufferizationDialect, ptr::PtrDialect,
-                           cuda_tile::cpu::CudaTileCPUDialect>();
+    target.addLegalDialect<
+        arith::ArithDialect, func::FuncDialect, memref::MemRefDialect,
+        vector::VectorDialect, bufferization::BufferizationDialect,
+        linalg::LinalgDialect, tensor::TensorDialect, ptr::PtrDialect,
+        cuda_tile::cpu::CudaTileCPUDialect>();
 
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(
         patterns, typeConverter);
