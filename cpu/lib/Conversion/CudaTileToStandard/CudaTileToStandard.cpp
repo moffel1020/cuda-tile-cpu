@@ -154,10 +154,44 @@ struct ConvertCudaTileBroadcast
   matchAndRewrite(cuda_tile::BroadcastOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
 
-    auto newVec = getTypeConverter()->convertType(op.getResult());
-    rewriter.replaceOpWithNewOp<vector::BroadcastOp>(op, newVec,
-                                                     adaptor.getSource());
+    auto opTy = op.getType();
+    auto rank = opTy.getRank();
+
+    AffineMap inputMap =
+        getBroadcastInputMap(op.getSource().getType().getShape(),
+                             opTy.getRank(), rewriter.getContext());
+    AffineMap outputMap = AffineMap::getMultiDimIdentityMap(
+        opTy.getRank(), rewriter.getContext());
+
+    SmallVector<utils::IteratorType> iterators(rank,
+                                               utils::IteratorType::parallel);
+
+    auto empty = tensor::EmptyOp::create(rewriter, op.getLoc(), opTy.getShape(),
+                                         opTy.getElementType());
+    auto newOp = linalg::GenericOp::create(
+        rewriter, op.getLoc(), empty.getType(), adaptor.getOperands(), {empty},
+        {inputMap, outputMap}, iterators,
+        [](OpBuilder &b, Location loc, ValueRange args) {
+          linalg::YieldOp::create(b, loc, args[0]);
+        });
+
+    rewriter.replaceOp(op, newOp);
     return success();
+  }
+
+private:
+  static AffineMap getBroadcastInputMap(ArrayRef<int64_t> input,
+                                        int64_t outputRank, MLIRContext *ctx) {
+    SmallVector<AffineExpr> exprs;
+    for (auto [i, dimSize] : llvm::enumerate(input)) {
+      if (dimSize == 1) {
+        exprs.push_back(getAffineConstantExpr(0, ctx));
+      } else {
+        exprs.push_back(getAffineDimExpr(i, ctx));
+      }
+    }
+
+    return AffineMap::get(outputRank, 0, exprs, ctx);
   }
 };
 
