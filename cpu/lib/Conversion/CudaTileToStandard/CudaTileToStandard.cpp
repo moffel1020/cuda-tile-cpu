@@ -146,7 +146,6 @@ struct IotaPattern : public OpConversionPattern<cuda_tile::IotaOp> {
 };
 
 struct BroadcastPattern : public OpConversionPattern<cuda_tile::BroadcastOp> {
-
   using OpConversionPattern<cuda_tile::BroadcastOp>::OpConversionPattern;
 
   LogicalResult
@@ -231,11 +230,6 @@ struct ConvertBinaryOpWithMap : public OpConversionPattern<T> {
   }
 };
 
-// bitwise
-using OrIPattern = ConvertBinaryOpWithMap<cuda_tile::OrIOp, arith::OrIOp>;
-using XOrIPattern = ConvertBinaryOpWithMap<cuda_tile::XOrIOp, arith::XOrIOp>;
-using AndIPattern = ConvertBinaryOpWithMap<cuda_tile::AndIOp, arith::AndIOp>;
-
 template <typename T, typename U>
 struct ReplaceWithLinalg : public OpConversionPattern<T> {
   using OpConversionPattern<T>::OpConversionPattern;
@@ -243,7 +237,6 @@ struct ReplaceWithLinalg : public OpConversionPattern<T> {
   LogicalResult
   matchAndRewrite(T op, typename T::Adaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    auto res = op.getResult().getType();
     auto opTy = op.getType();
     auto empty = tensor::EmptyOp::create(rewriter, op.getLoc(), opTy.getShape(),
                                          opTy.getElementType());
@@ -253,22 +246,29 @@ struct ReplaceWithLinalg : public OpConversionPattern<T> {
   }
 };
 
+// bitwise
+using OrIPattern = ConvertBinaryOpWithMap<cuda_tile::OrIOp, arith::OrIOp>;
+using XOrIPattern = ConvertBinaryOpWithMap<cuda_tile::XOrIOp, arith::XOrIOp>;
+using AndIPattern = ConvertBinaryOpWithMap<cuda_tile::AndIOp, arith::AndIOp>;
+
 // TODO: ignoring information. could preserve some by using linalg generic
-// rounding info is also ignored, which could lead to different behavior
 // integer
+// using DivIPattern = ReplaceWithLinalg<cuda_tile::DivIOp, linalg::DivOp>;
+// using AbsIPattern = ReplaceWithLinalg<cuda_tile::AbsIOp, linalg::AbsOp; TODO: broken?
 using AddIPattern =
     ReplaceWithLinalg<cuda_tile::AddIOp, linalg::AddOp>; // ignore int overflow
 using SubIPattern =
     ReplaceWithLinalg<cuda_tile::SubIOp, linalg::SubOp>; // ignore int overflow
 using MulIPattern =
     ReplaceWithLinalg<cuda_tile::MulIOp, linalg::MulOp>; // ignore int overflow
+using ShLIPattern =
+    ConvertBinaryOpWithMap<cuda_tile::ShLIOp,
+                           arith::ShLIOp>; // ignore int overflow
+
 // floating point
 using AbsFPattern = ReplaceWithLinalg<cuda_tile::AbsFOp, linalg::AbsOp>;
-using AddFPattern =
-    ReplaceWithLinalg<cuda_tile::AddFOp, linalg::AddOp>; // ignore rounding
 using CeilPattern = ReplaceWithLinalg<cuda_tile::CeilOp, linalg::CeilOp>;
-using FloorPattern =
-    ReplaceWithLinalg<cuda_tile::FloorOp, linalg::FloorOp>; // ignoring rounding
+using FloorPattern = ReplaceWithLinalg<cuda_tile::FloorOp, linalg::FloorOp>;
 
 struct PrintPattern : public OpConversionPattern<cuda_tile::PrintOp> {
   using OpConversionPattern<cuda_tile::PrintOp>::OpConversionPattern;
@@ -395,12 +395,11 @@ struct ConvertCudaTileToStandard
     CudaTileTypeConverter typeConverter;
 
     RewritePatternSet patterns(context);
-    patterns
-        .add<EntryPattern, ReturnPattern, ConstantPattern, IotaPattern,
-             ReshapePattern, BroadcastPattern, AddIPattern, SubIPattern,
-             MulIPattern, OrIPattern, XOrIPattern, AndIPattern, FloorPattern,
-             CeilPattern, AbsFPattern, PrintPattern, MoveOutOfCudaTileModule>(
-            typeConverter, context);
+    patterns.add<EntryPattern, ReturnPattern, ConstantPattern, IotaPattern,
+                 ReshapePattern, BroadcastPattern, AddIPattern, SubIPattern,
+                 ShLIPattern, MulIPattern, OrIPattern, XOrIPattern,
+                 AndIPattern, FloorPattern, CeilPattern, AbsFPattern,
+                 PrintPattern, MoveOutOfCudaTileModule>(typeConverter, context);
 
     target.addIllegalDialect<CudaTileDialect>();
     target.addLegalDialect<
