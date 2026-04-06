@@ -62,7 +62,7 @@ private:
   // }
 };
 
-struct ConvertEntryToFunc : public OpConversionPattern<cuda_tile::EntryOp> {
+struct EntryPattern : public OpConversionPattern<cuda_tile::EntryOp> {
   using OpConversionPattern<cuda_tile::EntryOp>::OpConversionPattern;
 
   LogicalResult
@@ -78,7 +78,7 @@ struct ConvertEntryToFunc : public OpConversionPattern<cuda_tile::EntryOp> {
   }
 };
 
-struct ConvertCudaTileReturn : public OpConversionPattern<cuda_tile::ReturnOp> {
+struct ReturnPattern : public OpConversionPattern<cuda_tile::ReturnOp> {
   using OpConversionPattern<cuda_tile::ReturnOp>::OpConversionPattern;
 
   LogicalResult
@@ -96,8 +96,7 @@ struct ConvertCudaTileReturn : public OpConversionPattern<cuda_tile::ReturnOp> {
   }
 };
 
-struct ConvertCudaTileConstant
-    : public OpConversionPattern<cuda_tile::ConstantOp> {
+struct ConstantPattern : public OpConversionPattern<cuda_tile::ConstantOp> {
   using OpConversionPattern<cuda_tile::ConstantOp>::OpConversionPattern;
 
   LogicalResult
@@ -120,7 +119,7 @@ struct ConvertCudaTileConstant
   }
 };
 
-struct ConvertCudaTileIota : public OpConversionPattern<cuda_tile::IotaOp> {
+struct IotaPattern : public OpConversionPattern<cuda_tile::IotaOp> {
   using OpConversionPattern<cuda_tile::IotaOp>::OpConversionPattern;
 
   LogicalResult
@@ -146,8 +145,7 @@ struct ConvertCudaTileIota : public OpConversionPattern<cuda_tile::IotaOp> {
   }
 };
 
-struct ConvertCudaTileBroadcast
-    : public OpConversionPattern<cuda_tile::BroadcastOp> {
+struct BroadcastPattern : public OpConversionPattern<cuda_tile::BroadcastOp> {
 
   using OpConversionPattern<cuda_tile::BroadcastOp>::OpConversionPattern;
 
@@ -196,8 +194,7 @@ private:
   }
 };
 
-struct ConvertCudaTileReshape
-    : public OpConversionPattern<cuda_tile::ReshapeOp> {
+struct ReshapePattern : public OpConversionPattern<cuda_tile::ReshapeOp> {
   using OpConversionPattern<cuda_tile::ReshapeOp>::OpConversionPattern;
 
   LogicalResult
@@ -235,15 +232,12 @@ struct ConvertBinaryOpWithMap : public OpConversionPattern<T> {
 };
 
 // bitwise
-using ConvertCudaTileOrI =
-    ConvertBinaryOpWithMap<cuda_tile::OrIOp, arith::OrIOp>;
-using ConvertCudaTileXOrI =
-    ConvertBinaryOpWithMap<cuda_tile::XOrIOp, arith::XOrIOp>;
-using ConvertCudaTileAndI =
-    ConvertBinaryOpWithMap<cuda_tile::AndIOp, arith::AndIOp>;
+using OrIPattern = ConvertBinaryOpWithMap<cuda_tile::OrIOp, arith::OrIOp>;
+using XOrIPattern = ConvertBinaryOpWithMap<cuda_tile::XOrIOp, arith::XOrIOp>;
+using AndIPattern = ConvertBinaryOpWithMap<cuda_tile::AndIOp, arith::AndIOp>;
 
 template <typename T, typename U>
-struct ConvertArithOp : public OpConversionPattern<T> {
+struct ReplaceWithLinalg : public OpConversionPattern<T> {
   using OpConversionPattern<T>::OpConversionPattern;
 
   LogicalResult
@@ -259,13 +253,24 @@ struct ConvertArithOp : public OpConversionPattern<T> {
   }
 };
 
-// TODO: ignoring overflow hints here, could we use them by using linalg map?
-// in addition to these, ShLI also has int overflow flag
-using ConvertCudaTileAddI = ConvertArithOp<cuda_tile::AddIOp, linalg::AddOp>;
-using ConvertCudaTileSubI = ConvertArithOp<cuda_tile::SubIOp, linalg::SubOp>;
-using ConvertCudaTileMulI = ConvertArithOp<cuda_tile::MulIOp, linalg::MulOp>;
+// TODO: ignoring information. could preserve some by using linalg generic
+// rounding info is also ignored, which could lead to different behavior
+// integer
+using AddIPattern =
+    ReplaceWithLinalg<cuda_tile::AddIOp, linalg::AddOp>; // ignore int overflow
+using SubIPattern =
+    ReplaceWithLinalg<cuda_tile::SubIOp, linalg::SubOp>; // ignore int overflow
+using MulIPattern =
+    ReplaceWithLinalg<cuda_tile::MulIOp, linalg::MulOp>; // ignore int overflow
+// floating point
+using AbsFPattern = ReplaceWithLinalg<cuda_tile::AbsFOp, linalg::AbsOp>;
+using AddFPattern =
+    ReplaceWithLinalg<cuda_tile::AddFOp, linalg::AddOp>; // ignore rounding
+using CeilPattern = ReplaceWithLinalg<cuda_tile::CeilOp, linalg::CeilOp>;
+using FloorPattern =
+    ReplaceWithLinalg<cuda_tile::FloorOp, linalg::FloorOp>; // ignoring rounding
 
-struct ConvertCudaTilePrint : public OpConversionPattern<cuda_tile::PrintOp> {
+struct PrintPattern : public OpConversionPattern<cuda_tile::PrintOp> {
   using OpConversionPattern<cuda_tile::PrintOp>::OpConversionPattern;
 
   LogicalResult
@@ -390,13 +395,12 @@ struct ConvertCudaTileToStandard
     CudaTileTypeConverter typeConverter;
 
     RewritePatternSet patterns(context);
-    patterns.add<ConvertEntryToFunc, ConvertCudaTileReturn,
-                 ConvertCudaTileConstant, ConvertCudaTileIota,
-                 ConvertCudaTileReshape, ConvertCudaTileBroadcast,
-                 ConvertCudaTileAddI, ConvertCudaTileSubI, ConvertCudaTileMulI,
-                 ConvertCudaTileOrI, ConvertCudaTileXOrI, ConvertCudaTileAndI,
-                 ConvertCudaTilePrint, MoveOutOfCudaTileModule>(typeConverter,
-                                                                context);
+    patterns
+        .add<EntryPattern, ReturnPattern, ConstantPattern, IotaPattern,
+             ReshapePattern, BroadcastPattern, AddIPattern, SubIPattern,
+             MulIPattern, OrIPattern, XOrIPattern, AndIPattern, FloorPattern,
+             CeilPattern, AbsFPattern, PrintPattern, MoveOutOfCudaTileModule>(
+            typeConverter, context);
 
     target.addIllegalDialect<CudaTileDialect>();
     target.addLegalDialect<

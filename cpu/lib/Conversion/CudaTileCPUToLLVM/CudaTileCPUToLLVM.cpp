@@ -26,7 +26,7 @@ using namespace mlir;
 using namespace cuda_tile;
 using namespace llvm;
 
-struct ConvertPrintOp : public OpConversionPattern<cpu::PrintOp> {
+struct PrintPattern : public OpConversionPattern<cpu::PrintOp> {
   using OpConversionPattern<cpu::PrintOp>::OpConversionPattern;
 
   LogicalResult
@@ -138,7 +138,7 @@ struct ConvertCudaTileCPUToLLVM
     LLVMTypeConverter typeConverter(context);
 
     RewritePatternSet patterns(context);
-    patterns.add<ConvertPrintOp>(typeConverter, context);
+    patterns.add<PrintPattern>(typeConverter, context);
 
     target.addIllegalDialect<cpu::CudaTileCPUDialect>();
     target.addLegalDialect<LLVM::LLVMDialect>();
