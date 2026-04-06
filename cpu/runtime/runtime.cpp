@@ -94,6 +94,8 @@ extern "C" void ct_cpu_print_str(const char *str) { std::cout << str; }
 // force semicolon ^
 
 CT_CPU_PRINT_MEMREF(i32, int32_t);
-CT_CPU_PRINT_MEMREF(u32, int64_t);
+CT_CPU_PRINT_MEMREF(u32, uint32_t);
+CT_CPU_PRINT_MEMREF(i64, int64_t);
+CT_CPU_PRINT_MEMREF(u64, uint64_t);
 CT_CPU_PRINT_MEMREF(f32, float);
 CT_CPU_PRINT_MEMREF(f64, double);

@@ -10,7 +10,7 @@ def ConvertCudaTileToStandard : Pass<"convert-cuda-tile-to-standard", "mlir::Mod
   let dependentDialects = ["mlir::cuda_tile::CudaTileDialect",
                            "mlir::cuda_tile::cpu::CudaTileCPUDialect",
                            "mlir::arith::ArithDialect",
-                           "mlir::vector::VectorDialect",
+                           "mlir::math::MathDialect",
                            "mlir::tensor::TensorDialect",
                            "mlir::linalg::LinalgDialect",
                            "mlir::bufferization::BufferizationDialect",

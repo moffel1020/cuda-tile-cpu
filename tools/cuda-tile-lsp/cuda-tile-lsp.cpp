@@ -5,6 +5,7 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
@@ -18,7 +19,7 @@ int main(int argc, char **argv) {
   registry
       .insert<cuda_tile::CudaTileDialect, cuda_tile::cpu::CudaTileCPUDialect,
               mlir::tensor::TensorDialect, mlir::linalg::LinalgDialect,
-              mlir::arith::ArithDialect, mlir::vector::VectorDialect,
+              mlir::math::MathDialect, mlir::arith::ArithDialect,
               mlir::scf::SCFDialect, mlir::memref::MemRefDialect,
               mlir::func::FuncDialect, mlir::affine::AffineDialect>();
 

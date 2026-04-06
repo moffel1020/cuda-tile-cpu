@@ -6,12 +6,12 @@
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Ptr/IR/PtrDialect.h"
 #include "mlir/Dialect/Ptr/IR/PtrOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
-#include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
@@ -127,21 +127,22 @@ struct ConvertCudaTileIota : public OpConversionPattern<cuda_tile::IotaOp> {
   matchAndRewrite(cuda_tile::IotaOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
 
-    auto opType = op.getResult().getType();
-    auto shape = opType.getShape();
-    if (shape.size() != 1) {
-      return rewriter.notifyMatchFailure(op, "1d shape expected for iota op");
-    }
+    // auto opType = op.getResult().getType();
+    // auto shape = opType.getShape();
+    // if (shape.size() != 1) {
+    //   return rewriter.notifyMatchFailure(op, "1d shape expected for iota
+    //   op");
+    // }
 
-    auto width = opType.getElementType().getIntOrFloatBitWidth();
-    SmallVector<APInt> indices(opType.getNumElements());
-    std::iota(indices.begin(), indices.end(), APInt(width, 0));
+    // auto width = opType.getElementType().getIntOrFloatBitWidth();
+    // SmallVector<APInt> indices(opType.getNumElements());
+    // std::iota(indices.begin(), indices.end(), APInt(width, 0));
 
-    auto vecType = VectorType::get(shape, opType.getElementType());
-    rewriter.replaceOpWithNewOp<arith::ConstantOp>(
-        op, DenseElementsAttr::get(vecType, indices));
+    // auto vecType = VectorType::get(shape, opType.getElementType());
+    // rewriter.replaceOpWithNewOp<arith::ConstantOp>(
+    //     op, DenseElementsAttr::get(vecType, indices));
 
-    return success();
+    return failure();
   }
 };
 
@@ -203,24 +204,9 @@ struct ConvertCudaTileReshape
   matchAndRewrite(cuda_tile::ReshapeOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
 
-    auto opType = op.getType();
-    auto src = adaptor.getSource();
-
-    // we convert tile<!cuda_tile.ptr<_>> to just a !ptr.ptr so to convert
-    // !ptr.ptr to vector<1xptr> would be a broadcast instead of a reshape
-    if (isa<ptr::PtrType>(src.getType())) {
-      auto vecType = VectorType::get(opType.getShape(), src.getType());
-      rewriter.replaceOpWithNewOp<vector::BroadcastOp>(op, vecType, src);
-      return success();
-    }
-
-    if (!isa<VectorType>(src.getType())) {
-      return failure();
-    }
-
-    auto vecType = VectorType::get(opType.getShape(), opType.getElementType());
-    rewriter.replaceOpWithNewOp<vector::ShapeCastOp>(op, vecType,
-                                                     adaptor.getSource());
+    auto tensorType = getTypeConverter()->convertType(op.getType());
+    rewriter.replaceOpWithNewOp<tensor::ReshapeOp>(op, tensorType,
+                                                   adaptor.getSource());
     return success();
   }
 };
@@ -248,6 +234,7 @@ struct ConvertBinaryOpWithMap : public OpConversionPattern<T> {
   }
 };
 
+// bitwise
 using ConvertCudaTileOrI =
     ConvertBinaryOpWithMap<cuda_tile::OrIOp, arith::OrIOp>;
 using ConvertCudaTileXOrI =
@@ -301,7 +288,7 @@ struct ConvertCudaTilePrint : public OpConversionPattern<cuda_tile::PrintOp> {
                                            "print operands should be tiles");
       }
 
-      // store the vector arg in a memref to call print
+      // store the tensor arg in a memref to call print
       auto loc = op.getLoc();
       auto tile = cast<TileType>(arg.getType());
       auto memType = MemRefType::get(tile.getShape(), tile.getElementType());
@@ -414,8 +401,8 @@ struct ConvertCudaTileToStandard
     target.addIllegalDialect<CudaTileDialect>();
     target.addLegalDialect<
         arith::ArithDialect, func::FuncDialect, memref::MemRefDialect,
-        vector::VectorDialect, bufferization::BufferizationDialect,
-        linalg::LinalgDialect, tensor::TensorDialect, ptr::PtrDialect,
+        bufferization::BufferizationDialect, linalg::LinalgDialect,
+        tensor::TensorDialect, math::MathDialect, ptr::PtrDialect,
         cuda_tile::cpu::CudaTileCPUDialect>();
 
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(
