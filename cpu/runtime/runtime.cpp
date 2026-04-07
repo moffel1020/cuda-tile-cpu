@@ -2,14 +2,15 @@
 
 #include <iostream>
 
-// print functions copied from "mlir/ExecutionEngine/RunnerUtils.h"
+// print functions copied (mostly) from "mlir/ExecutionEngine/RunnerUtils.h"
 static inline void printSpace(std::ostream &os, int count) {
   for (int i = 0; i < count; ++i) {
     os << ' ';
   }
 }
 
-template <typename T> struct MemRefDataPrinter {
+template <typename T>
+struct MemRefDataPrinter {
   static void print(std::ostream &os, T *base, int64_t dim, int64_t rank,
                     int64_t offset, const int64_t *sizes,
                     const int64_t *strides);
@@ -34,8 +35,9 @@ void MemRefDataPrinter<T>::printFirst(std::ostream &os, T *base, int64_t dim,
     return;
   }
   os << ", ";
-  if (dim > 1)
+  if (dim > 1) {
     os << "\n";
+  }
 }
 
 template <typename T>
@@ -43,7 +45,11 @@ void MemRefDataPrinter<T>::print(std::ostream &os, T *base, int64_t dim,
                                  int64_t rank, int64_t offset,
                                  const int64_t *sizes, const int64_t *strides) {
   if (dim == 0) {
-    os << base[offset];
+    if constexpr (std::is_same_v<T, int8_t>) {
+      os << static_cast<int32_t>(base[offset]);
+    } else {
+      os << base[offset];
+    }
     return;
   }
   printFirst(os, base, dim, rank, offset, sizes, strides);
@@ -52,11 +58,13 @@ void MemRefDataPrinter<T>::print(std::ostream &os, T *base, int64_t dim,
     print(os, base, dim - 1, rank, offset + i * strides[0], sizes + 1,
           strides + 1);
     os << ", ";
-    if (dim > 1)
+    if (dim > 1) {
       os << "\n";
+    }
   }
-  if (sizes[0] <= 1)
+  if (sizes[0] <= 1) {
     return;
+  }
   printLast(os, base, dim, rank, offset, sizes, strides);
 }
 
@@ -71,13 +79,16 @@ void MemRefDataPrinter<T>::printLast(std::ostream &os, T *base, int64_t dim,
   os << "]";
 }
 
-template <typename T> void printMemRef(const DynamicMemRefType<T> &m) {
-  if (m.rank == 0)
+template <typename T>
+void printMemRef(const DynamicMemRefType<T> &m) {
+  if (m.rank == 0) {
     std::cout << "[";
+  }
   MemRefDataPrinter<T>::print(std::cout, m.data, m.rank, m.rank, m.offset,
                               m.sizes, m.strides);
-  if (m.rank == 0)
+  if (m.rank == 0) {
     std::cout << "]";
+  }
 }
 
 // runtime exports
@@ -93,6 +104,7 @@ extern "C" void ct_cpu_print_str(const char *str) { std::cout << str; }
   static_assert(true, "")
 // force semicolon ^
 
+CT_CPU_PRINT_MEMREF(i8, int8_t);
 CT_CPU_PRINT_MEMREF(i32, int32_t);
 CT_CPU_PRINT_MEMREF(u32, uint32_t);
 CT_CPU_PRINT_MEMREF(i64, int64_t);

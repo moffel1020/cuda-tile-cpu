@@ -1,10 +1,10 @@
 #include "cuda_tile_cpu/Conversion/CudaTileCPUToLLVM/Passes.h"
 #include "cuda_tile_cpu/Dialect/CudaTileCPU/IR/Dialect.h"
-
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
+
 #include "llvm/ADT/TypeSwitch.h"
 
 #include <memory>
@@ -94,12 +94,15 @@ private:
             .Case<mlir::IntegerType>([](auto intType) {
               const auto w = intType.getWidth();
               switch (w) {
+              case 1:
+              case 8:
+                return "ct_cpu_print_memref_i8";
               case 32:
                 return "ct_cpu_print_memref_i32";
               case 64:
                 return "ct_cpu_print_memref_i64";
               default:
-                llvm_unreachable("unimplemented integer bit width");
+                return "unimplemented"; // TODO: proper error here
               }
             })
             .DefaultUnreachable();
