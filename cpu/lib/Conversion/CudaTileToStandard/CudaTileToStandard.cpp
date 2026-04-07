@@ -270,11 +270,11 @@ using AbsFPattern = ReplaceWithLinalg<cuda_tile::AbsFOp, linalg::AbsOp>;
 using CeilPattern = ReplaceWithLinalg<cuda_tile::CeilOp, linalg::CeilOp>;
 using FloorPattern = ReplaceWithLinalg<cuda_tile::FloorOp, linalg::FloorOp>;
 
-struct PrintPattern : public OpConversionPattern<cuda_tile::PrintOp> {
-  using OpConversionPattern<cuda_tile::PrintOp>::OpConversionPattern;
+struct PrintPattern : public OpConversionPattern<cuda_tile::PrintTkoOp> {
+  using OpConversionPattern<cuda_tile::PrintTkoOp>::OpConversionPattern;
 
   LogicalResult
-  matchAndRewrite(cuda_tile::PrintOp op, OpAdaptor adaptor,
+  matchAndRewrite(cuda_tile::PrintTkoOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
 
     if (op.getNumOperands() == 0) {
