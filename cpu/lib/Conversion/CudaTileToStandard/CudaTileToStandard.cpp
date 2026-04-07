@@ -1,7 +1,6 @@
 #include "cuda_tile/Dialect/CudaTile/IR/Ops.h"
 #include "cuda_tile_cpu/Conversion/CudaTileToStandard/Passes.h"
 #include "cuda_tile_cpu/Dialect/CudaTileCPU/IR/Dialect.h"
-
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -208,7 +207,7 @@ struct ReshapePattern : public OpConversionPattern<cuda_tile::ReshapeOp> {
 };
 
 template <typename T, typename U>
-struct ConvertBinaryOpWithMap : public OpConversionPattern<T> {
+struct ConvertWithMap : public OpConversionPattern<T> {
   using OpConversionPattern<T>::OpConversionPattern;
 
   LogicalResult
@@ -218,10 +217,11 @@ struct ConvertBinaryOpWithMap : public OpConversionPattern<T> {
     auto opTy = op.getType();
     auto empty = tensor::EmptyOp::create(rewriter, op.getLoc(), opTy.getShape(),
                                          opTy.getElementType());
+
     auto mapOp = linalg::MapOp::create(
         rewriter, op.getLoc(), adaptor.getOperands(), empty,
         [](OpBuilder &b, Location loc, ValueRange args) {
-          auto newOp = U::create(b, loc, args.take_front(2));
+          auto newOp = U::create(b, loc, args.drop_back());
           linalg::YieldOp::create(b, loc, newOp.getResult());
         });
 
@@ -246,31 +246,62 @@ struct ReplaceWithLinalg : public OpConversionPattern<T> {
   }
 };
 
-// bitwise
-using OrIPattern = ConvertBinaryOpWithMap<cuda_tile::OrIOp, arith::OrIOp>;
-using XOrIPattern = ConvertBinaryOpWithMap<cuda_tile::XOrIOp, arith::XOrIOp>;
-using AndIPattern = ConvertBinaryOpWithMap<cuda_tile::AndIOp, arith::AndIOp>;
+struct MaxIPattern : public OpConversionPattern<cuda_tile::MaxIOp> {
+  using OpConversionPattern<cuda_tile::MaxIOp>::OpConversionPattern;
+  LogicalResult
+  matchAndRewrite(cuda_tile::MaxIOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
 
-// TODO: ignoring information. could preserve some by using linalg generic
+    auto signedness = op.getSignedness();
+    auto opTy = op.getType();
+    auto empty = tensor::EmptyOp::create(rewriter, op.getLoc(), opTy.getShape(),
+                                         opTy.getElementType());
+
+    auto newOp = std::invoke([&]() -> Operation * {
+      switch (signedness) {
+      case Signedness::Unsigned:
+        return linalg::MapOp::create(
+            rewriter, op.getLoc(), adaptor.getOperands(), empty,
+            [](OpBuilder &b, Location loc, ValueRange args) {
+              Value maxOp = arith::MaxUIOp::create(b, loc, args.drop_back());
+              linalg::YieldOp::create(b, loc, maxOp);
+            });
+      case Signedness::Signed:
+        return linalg::MaxOp::create(
+            rewriter, op.getLoc(),
+            ValueRange{adaptor.getLhs(), adaptor.getRhs()}, ValueRange{empty});
+      }
+    });
+
+    rewriter.replaceOp(op, newOp);
+    return success();
+  }
+};
+
+// bitwise
+using AndIPattern = ConvertWithMap<cuda_tile::AndIOp, arith::AndIOp>;
+
 // integer
-// using DivIPattern = ReplaceWithLinalg<cuda_tile::DivIOp, linalg::DivOp>;
-// using AbsIPattern = ReplaceWithLinalg<cuda_tile::AbsIOp, linalg::AbsOp; TODO: broken?
+// TODO: ignoring overflow information. could preserve some by using linalg
+// generic/map
+using AbsIPattern = ConvertWithMap<cuda_tile::AbsIOp, math::AbsIOp>;
 using AddIPattern =
     ReplaceWithLinalg<cuda_tile::AddIOp, linalg::AddOp>; // ignore int overflow
 using SubIPattern =
     ReplaceWithLinalg<cuda_tile::SubIOp, linalg::SubOp>; // ignore int overflow
 using MulIPattern =
     ReplaceWithLinalg<cuda_tile::MulIOp, linalg::MulOp>; // ignore int overflow
-using ShLIPattern =
-    ConvertBinaryOpWithMap<cuda_tile::ShLIOp,
-                           arith::ShLIOp>; // ignore int overflow
+using ShLIPattern = ConvertWithMap<cuda_tile::ShLIOp,
+                                   arith::ShLIOp>; // ignore int overflow
+using OrIPattern = ConvertWithMap<cuda_tile::OrIOp, arith::OrIOp>;
+using XOrIPattern = ConvertWithMap<cuda_tile::XOrIOp, arith::XOrIOp>;
 
 // floating point
 using AbsFPattern = ReplaceWithLinalg<cuda_tile::AbsFOp, linalg::AbsOp>;
 using CeilPattern = ReplaceWithLinalg<cuda_tile::CeilOp, linalg::CeilOp>;
 using FloorPattern = ReplaceWithLinalg<cuda_tile::FloorOp, linalg::FloorOp>;
 
-struct PrintPattern : public OpConversionPattern<cuda_tile::PrintTkoOp> {
+struct PrintTkoPattern : public OpConversionPattern<cuda_tile::PrintTkoOp> {
   using OpConversionPattern<cuda_tile::PrintTkoOp>::OpConversionPattern;
 
   LogicalResult
@@ -397,9 +428,10 @@ struct ConvertCudaTileToStandard
     RewritePatternSet patterns(context);
     patterns.add<EntryPattern, ReturnPattern, ConstantPattern, IotaPattern,
                  ReshapePattern, BroadcastPattern, AddIPattern, SubIPattern,
-                 ShLIPattern, MulIPattern, OrIPattern, XOrIPattern,
-                 AndIPattern, FloorPattern, CeilPattern, AbsFPattern,
-                 PrintPattern, MoveOutOfCudaTileModule>(typeConverter, context);
+                 ShLIPattern, MulIPattern, OrIPattern, XOrIPattern, AndIPattern,
+                 MaxIPattern, AbsIPattern, FloorPattern, CeilPattern,
+                 AbsFPattern, PrintTkoPattern, MoveOutOfCudaTileModule>(
+        typeConverter, context);
 
     target.addIllegalDialect<CudaTileDialect>();
     target.addLegalDialect<
