@@ -246,10 +246,12 @@ struct ReplaceWithLinalg : public OpConversionPattern<T> {
   }
 };
 
-struct MaxIPattern : public OpConversionPattern<cuda_tile::MaxIOp> {
-  using OpConversionPattern<cuda_tile::MaxIOp>::OpConversionPattern;
+template <typename T, typename SignedOp, typename UnsignedMapOp>
+struct MaxIMinIPattern : public OpConversionPattern<T> {
+  using OpConversionPattern<T>::OpConversionPattern;
+
   LogicalResult
-  matchAndRewrite(cuda_tile::MaxIOp op, OpAdaptor adaptor,
+  matchAndRewrite(T op, typename T::Adaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
 
     auto signedness = op.getSignedness();
@@ -263,13 +265,57 @@ struct MaxIPattern : public OpConversionPattern<cuda_tile::MaxIOp> {
         return linalg::MapOp::create(
             rewriter, op.getLoc(), adaptor.getOperands(), empty,
             [](OpBuilder &b, Location loc, ValueRange args) {
-              Value maxOp = arith::MaxUIOp::create(b, loc, args.drop_back());
-              linalg::YieldOp::create(b, loc, maxOp);
+              Value mapOp = UnsignedMapOp::create(b, loc, args.drop_back());
+              linalg::YieldOp::create(b, loc, mapOp);
             });
       case Signedness::Signed:
-        return linalg::MaxOp::create(
-            rewriter, op.getLoc(),
-            ValueRange{adaptor.getLhs(), adaptor.getRhs()}, ValueRange{empty});
+        return SignedOp::create(rewriter, op.getLoc(),
+                                ValueRange{adaptor.getLhs(), adaptor.getRhs()},
+                                ValueRange{empty});
+      default:
+        llvm_unreachable(
+            "only unsigned and signed are valid"); // suppress warning because
+                                                   // of templated class
+      }
+    });
+
+    rewriter.replaceOp(op, newOp);
+    return success();
+  }
+};
+
+template <typename T, typename SignedOp, typename UnsignedOp>
+struct SignedUnsignedPattern : public OpConversionPattern<T> {
+  using OpConversionPattern<T>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(T op, typename T::Adaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto signedness = op.getSignedness();
+    auto opTy = op.getType();
+    auto empty = tensor::EmptyOp::create(rewriter, op.getLoc(), opTy.getShape(),
+                                         opTy.getElementType());
+
+    auto newOp = std::invoke([&]() -> Operation * {
+      switch (signedness) {
+      case Signedness::Unsigned:
+        return linalg::MapOp::create(
+            rewriter, op.getLoc(), adaptor.getOperands(), empty,
+            [](OpBuilder &b, Location loc, ValueRange args) {
+              Value mapOp = UnsignedOp::create(b, loc, args.drop_back());
+              linalg::YieldOp::create(b, loc, mapOp);
+            });
+      case Signedness::Signed:
+        return linalg::MapOp::create(
+            rewriter, op.getLoc(), adaptor.getOperands(), empty,
+            [](OpBuilder &b, Location loc, ValueRange args) {
+              Value mapOp = SignedOp::create(b, loc, args.drop_back());
+              linalg::YieldOp::create(b, loc, mapOp);
+            });
+      default:
+        llvm_unreachable(
+            "only unsigned and signed are valid"); // suppress warning because
+                                                   // of templated class
       }
     });
 
@@ -295,6 +341,14 @@ using ShLIPattern = ConvertWithMap<cuda_tile::ShLIOp,
                                    arith::ShLIOp>; // ignore int overflow
 using OrIPattern = ConvertWithMap<cuda_tile::OrIOp, arith::OrIOp>;
 using XOrIPattern = ConvertWithMap<cuda_tile::XOrIOp, arith::XOrIOp>;
+using MaxIPattern =
+    MaxIMinIPattern<cuda_tile::MaxIOp, linalg::MaxOp, arith::MaxUIOp>;
+using MinIPattern =
+    MaxIMinIPattern<cuda_tile::MinIOp, linalg::MinOp, arith::MinUIOp>;
+using ShRIPattern =
+    SignedUnsignedPattern<cuda_tile::ShRIOp, arith::ShRSIOp, arith::ShRUIOp>;
+using RemIPattern =
+    SignedUnsignedPattern<cuda_tile::RemIOp, arith::RemSIOp, arith::RemUIOp>;
 
 // floating point
 using AbsFPattern = ReplaceWithLinalg<cuda_tile::AbsFOp, linalg::AbsOp>;
@@ -428,10 +482,11 @@ struct ConvertCudaTileToStandard
     RewritePatternSet patterns(context);
     patterns.add<EntryPattern, ReturnPattern, ConstantPattern, IotaPattern,
                  ReshapePattern, BroadcastPattern, AddIPattern, SubIPattern,
-                 ShLIPattern, MulIPattern, OrIPattern, XOrIPattern, AndIPattern,
-                 MaxIPattern, AbsIPattern, FloorPattern, CeilPattern,
-                 AbsFPattern, PrintTkoPattern, MoveOutOfCudaTileModule>(
-        typeConverter, context);
+                 ShLIPattern, ShRIPattern, MulIPattern, OrIPattern, XOrIPattern,
+                 AndIPattern, MaxIPattern, MinIPattern, RemIPattern,
+                 AbsIPattern, FloorPattern, CeilPattern, AbsFPattern,
+                 PrintTkoPattern, MoveOutOfCudaTileModule>(typeConverter,
+                                                           context);
 
     target.addIllegalDialect<CudaTileDialect>();
     target.addLegalDialect<
