@@ -324,6 +324,52 @@ struct SignedUnsignedPattern : public OpConversionPattern<T> {
   }
 };
 
+struct CmpIPattern : public OpConversionPattern<cuda_tile::CmpIOp> {
+  using OpConversionPattern<cuda_tile::CmpIOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(CmpIOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+
+    auto cmpPred = std::invoke(
+        [&](cuda_tile::ComparisonPredicate pred, cuda_tile::Signedness sign) {
+          using A = arith::CmpIPredicate;
+          using S = cuda_tile::Signedness;
+
+          switch (pred) {
+          case ComparisonPredicate::EQUAL:
+            return A::eq;
+          case ComparisonPredicate::NOT_EQUAL:
+            return A::ne;
+          case ComparisonPredicate::LESS_THAN:
+            return sign == S::Signed ? A::slt : A::ult;
+          case ComparisonPredicate::LESS_THAN_OR_EQUAL:
+            return sign == S::Signed ? A::sle : A::ule;
+          case ComparisonPredicate::GREATER_THAN:
+            return sign == S::Signed ? A::sgt : A::ugt;
+          case ComparisonPredicate::GREATER_THAN_OR_EQUAL:
+            return sign == S::Signed ? A::sge : A::uge;
+          }
+        },
+        op.getComparisonPredicate(), op.getSignedness());
+
+    auto opTy = op.getType();
+    auto boolType = IntegerType::get(getContext(), 1);
+    auto empty = tensor::EmptyOp::create(rewriter, op.getLoc(), opTy.getShape(),
+                                         boolType);
+
+    rewriter.replaceOpWithNewOp<linalg::MapOp>(
+        op, adaptor.getOperands(), empty,
+        [&](OpBuilder &b, Location loc, ValueRange args) {
+          Value newOp = arith::CmpIOp::create(b, loc, boolType, cmpPred,
+                                              args[0], args[1]);
+          linalg::YieldOp::create(b, loc, newOp);
+        });
+
+    return success();
+  }
+};
+
 // bitwise
 using AndIPattern = ConvertWithMap<cuda_tile::AndIOp, arith::AndIOp>;
 
@@ -482,11 +528,11 @@ struct ConvertCudaTileToStandard
     RewritePatternSet patterns(context);
     patterns.add<EntryPattern, ReturnPattern, ConstantPattern, IotaPattern,
                  ReshapePattern, BroadcastPattern, AddIPattern, SubIPattern,
-                 ShLIPattern, ShRIPattern, MulIPattern, OrIPattern, XOrIPattern,
-                 AndIPattern, MaxIPattern, MinIPattern, RemIPattern,
-                 AbsIPattern, FloorPattern, CeilPattern, AbsFPattern,
-                 PrintTkoPattern, MoveOutOfCudaTileModule>(typeConverter,
-                                                           context);
+                 CmpIPattern, ShLIPattern, ShRIPattern, MulIPattern, OrIPattern,
+                 XOrIPattern, AndIPattern, MaxIPattern, MinIPattern,
+                 RemIPattern, AbsIPattern, FloorPattern, CeilPattern,
+                 AbsFPattern, PrintTkoPattern, MoveOutOfCudaTileModule>(
+        typeConverter, context);
 
     target.addIllegalDialect<CudaTileDialect>();
     target.addLegalDialect<
