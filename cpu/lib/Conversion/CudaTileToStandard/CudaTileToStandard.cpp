@@ -85,9 +85,8 @@ struct ReturnPattern : public OpConversionPattern<cuda_tile::ReturnOp> {
                   ConversionPatternRewriter &rewriter) const override {
 
     if (op.getNumOperands() > 0) {
-      return rewriter.notifyMatchFailure(op, [](Diagnostic &diag) {
-        diag << "return with operands not supported";
-      });
+      return rewriter.notifyMatchFailure(op,
+                                         "return with operands not supported");
     }
 
     rewriter.replaceOpWithNewOp<func::ReturnOp>(op);
@@ -102,7 +101,7 @@ struct ConstantPattern : public OpConversionPattern<cuda_tile::ConstantOp> {
   matchAndRewrite(cuda_tile::ConstantOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
 
-    auto oldType = op.getResult().getType();
+    auto oldType = op.getType();
     auto tensorType =
         RankedTensorType::get(oldType.getShape(), oldType.getElementType());
 
@@ -349,6 +348,8 @@ struct CmpIPattern : public OpConversionPattern<cuda_tile::CmpIOp> {
             return sign == S::Signed ? A::sgt : A::ugt;
           case ComparisonPredicate::GREATER_THAN_OR_EQUAL:
             return sign == S::Signed ? A::sge : A::uge;
+          default:
+            llvm_unreachable();
           }
         },
         op.getComparisonPredicate(), op.getSignedness());
@@ -368,6 +369,72 @@ struct CmpIPattern : public OpConversionPattern<cuda_tile::CmpIOp> {
 
     return success();
   }
+};
+
+struct DivIPattern : public OpConversionPattern<cuda_tile::DivIOp> {
+  using OpConversionPattern<cuda_tile::DivIOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(DivIOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto sign = op.getSignedness();
+    auto opTy = op.getType();
+    auto empty = tensor::EmptyOp::create(rewriter, op.getLoc(), opTy.getShape(),
+                                         opTy.getElementType());
+
+    CreateMapOp createMap{rewriter, op.getLoc(), adaptor.getOperands(), empty};
+
+    auto newOp = std::invoke([&]() -> Operation * {
+      using S = cuda_tile::Signedness;
+      using RM = cuda_tile::RoundingMode;
+
+      switch (op.getRounding()) {
+      case RM::NEGATIVE_INF:
+        return createMap.withOp<arith::FloorDivSIOp>();
+      case RM::POSITIVE_INF:
+        return sign == S::Signed ? createMap.withOp<arith::CeilDivSIOp>()
+                                 : createMap.withOp<arith::CeilDivUIOp>();
+      case RM::ZERO:
+        return sign == S::Signed
+                   ? linalg::DivOp::create(rewriter, op.getLoc(),
+                                           adaptor.getOperands(),
+                                           ValueRange{empty})
+                   : linalg::DivUnsignedOp::create(rewriter, op.getLoc(),
+                                                   adaptor.getOperands(),
+                                                   ValueRange{empty});
+      default:
+        return nullptr;
+      }
+    });
+
+    if (newOp == nullptr) {
+      return rewriter.notifyMatchFailure(
+          op.getLoc(),
+          "only rounding modes zero, negative_inf and positive_inf are allowed "
+          "on DivI");
+    }
+
+    rewriter.replaceOp(op, newOp);
+    return success();
+  }
+
+private:
+  struct CreateMapOp {
+    template <typename T>
+    Operation *withOp() {
+      return linalg::MapOp::create(
+          rewriter, loc, args, init,
+          [](OpBuilder &b, Location loc, ValueRange args) {
+            Value val = T::create(b, loc, args.drop_back());
+            linalg::YieldOp::create(b, loc, val);
+          });
+    }
+
+    ConversionPatternRewriter &rewriter;
+    Location loc;
+    ValueRange args;
+    Value init;
+  };
 };
 
 // bitwise
@@ -526,13 +593,13 @@ struct ConvertCudaTileToStandard
     CudaTileTypeConverter typeConverter;
 
     RewritePatternSet patterns(context);
-    patterns.add<EntryPattern, ReturnPattern, ConstantPattern, IotaPattern,
-                 ReshapePattern, BroadcastPattern, AddIPattern, SubIPattern,
-                 CmpIPattern, ShLIPattern, ShRIPattern, MulIPattern, OrIPattern,
-                 XOrIPattern, AndIPattern, MaxIPattern, MinIPattern,
-                 RemIPattern, AbsIPattern, FloorPattern, CeilPattern,
-                 AbsFPattern, PrintTkoPattern, MoveOutOfCudaTileModule>(
-        typeConverter, context);
+    patterns
+        .add<EntryPattern, ReturnPattern, ConstantPattern, IotaPattern,
+             ReshapePattern, BroadcastPattern, AddIPattern, SubIPattern,
+             CmpIPattern, ShLIPattern, ShRIPattern, MulIPattern, DivIPattern,
+             OrIPattern, XOrIPattern, AndIPattern, MaxIPattern, MinIPattern,
+             RemIPattern, AbsIPattern, FloorPattern, CeilPattern, AbsFPattern,
+             PrintTkoPattern, MoveOutOfCudaTileModule>(typeConverter, context);
 
     target.addIllegalDialect<CudaTileDialect>();
     target.addLegalDialect<
