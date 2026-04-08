@@ -197,10 +197,82 @@ struct ReshapePattern : public OpConversionPattern<cuda_tile::ReshapeOp> {
   LogicalResult
   matchAndRewrite(cuda_tile::ReshapeOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-
     auto tensorType = getTypeConverter()->convertType(op.getType());
     rewriter.replaceOpWithNewOp<tensor::ReshapeOp>(op, tensorType,
                                                    adaptor.getSource());
+    return success();
+  }
+};
+
+struct CatPattern : public OpConversionPattern<cuda_tile::CatOp> {
+  using OpConversionPattern<cuda_tile::CatOp>::OpConversionPattern;
+  LogicalResult
+  matchAndRewrite(cuda_tile::CatOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    rewriter.replaceOpWithNewOp<tensor::ConcatOp>(op, op.getDim(),
+                                                  adaptor.getOperands());
+    return success();
+  }
+};
+
+struct ExtractPattern : public OpConversionPattern<cuda_tile::ExtractOp> {
+  using OpConversionPattern<cuda_tile::ExtractOp>::OpConversionPattern;
+  LogicalResult
+  matchAndRewrite(cuda_tile::ExtractOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto resType =
+        cast<TensorType>(getTypeConverter()->convertType(op.getResult()));
+    auto resShape = resType.getShape();
+    SmallVector<int64_t> staticStrides(resType.getRank(), 1);
+    SmallVector<int64_t> staticOffsets(resType.getRank(), ShapedType::kDynamic);
+
+    SmallVector<Value> offsets;
+    for (auto [size, idx] : llvm::zip(resShape, adaptor.getIndices())) {
+      auto shapeSizeOp =
+          arith::ConstantIndexOp::create(rewriter, op.getLoc(), /*value=*/size);
+      llvm::errs() << "shape size: " << resShape.size()
+                   << " indices size: " << adaptor.getIndices().size() << "\n";
+      // TODO: check if this unpack is optimized away, if not try creating
+      // scalar constants and then doing tensor.from_elements for other users
+      auto unpackedIdx =
+          tensor::ExtractOp::create(rewriter, op.getLoc(), idx, {});
+      auto castedUnpackedIdx = arith::IndexCastUIOp::create(
+          rewriter, op.getLoc(), IndexType::get(getContext()), unpackedIdx);
+
+      offsets.emplace_back(arith::MulIOp::create(
+          rewriter, op.getLoc(), shapeSizeOp, castedUnpackedIdx));
+    }
+
+    llvm::errs() << "offsets size: " << offsets.size() << '\n';
+
+    auto newOp = tensor::ExtractSliceOp::create(
+        rewriter, op.getLoc(), resType, adaptor.getSource(),
+        /*offsets=*/offsets, /*sizes=*/ValueRange{},
+        /*strides=*/ValueRange{},
+        /*static_offsets=*/staticOffsets,
+        /*static_sizes=*/resShape,
+        /*static_strides=*/staticStrides);
+
+    rewriter.replaceOp(op, newOp);
+    return success();
+  }
+};
+
+struct PermutePattern : public OpConversionPattern<cuda_tile::PermuteOp> {
+  using OpConversionPattern<cuda_tile::PermuteOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(cuda_tile::PermuteOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto opTy = op.getType();
+    auto empty = tensor::EmptyOp::create(rewriter, op.getLoc(), opTy.getShape(),
+                                         opTy.getElementType());
+
+    SmallVector<int64_t> permuteMap = llvm::map_to_vector(
+        op.getPermutation(), [](auto v) { return static_cast<int64_t>(v); });
+
+    rewriter.replaceOpWithNewOp<linalg::TransposeOp>(op, adaptor.getSource(),
+                                                     empty, permuteMap);
     return success();
   }
 };
@@ -409,9 +481,9 @@ struct DivIPattern : public OpConversionPattern<cuda_tile::DivIOp> {
 
     if (newOp == nullptr) {
       return rewriter.notifyMatchFailure(
-          op.getLoc(),
-          "only rounding modes zero, negative_inf and positive_inf are allowed "
-          "on DivI");
+          op.getLoc(), "only rounding modes zero, negative_inf and "
+                       "positive_inf are allowed "
+                       "on DivI");
     }
 
     rewriter.replaceOp(op, newOp);
@@ -444,12 +516,12 @@ using AndIPattern = ConvertWithMap<cuda_tile::AndIOp, arith::AndIOp>;
 // TODO: ignoring overflow information. could preserve some by using linalg
 // generic/map
 using AbsIPattern = ConvertWithMap<cuda_tile::AbsIOp, math::AbsIOp>;
-using AddIPattern =
-    ReplaceWithLinalg<cuda_tile::AddIOp, linalg::AddOp>; // ignore int overflow
-using SubIPattern =
-    ReplaceWithLinalg<cuda_tile::SubIOp, linalg::SubOp>; // ignore int overflow
-using MulIPattern =
-    ReplaceWithLinalg<cuda_tile::MulIOp, linalg::MulOp>; // ignore int overflow
+using AddIPattern = ReplaceWithLinalg<cuda_tile::AddIOp,
+                                      linalg::AddOp>; // ignore int overflow
+using SubIPattern = ReplaceWithLinalg<cuda_tile::SubIOp,
+                                      linalg::SubOp>; // ignore int overflow
+using MulIPattern = ReplaceWithLinalg<cuda_tile::MulIOp,
+                                      linalg::MulOp>; // ignore int overflow
 using ShLIPattern = ConvertWithMap<cuda_tile::ShLIOp,
                                    arith::ShLIOp>; // ignore int overflow
 using OrIPattern = ConvertWithMap<cuda_tile::OrIOp, arith::OrIOp>;
@@ -593,13 +665,14 @@ struct ConvertCudaTileToStandard
     CudaTileTypeConverter typeConverter;
 
     RewritePatternSet patterns(context);
-    patterns
-        .add<EntryPattern, ReturnPattern, ConstantPattern, IotaPattern,
-             ReshapePattern, BroadcastPattern, AddIPattern, SubIPattern,
-             CmpIPattern, ShLIPattern, ShRIPattern, MulIPattern, DivIPattern,
-             OrIPattern, XOrIPattern, AndIPattern, MaxIPattern, MinIPattern,
-             RemIPattern, AbsIPattern, FloorPattern, CeilPattern, AbsFPattern,
-             PrintTkoPattern, MoveOutOfCudaTileModule>(typeConverter, context);
+    patterns.add<EntryPattern, ReturnPattern, ConstantPattern, IotaPattern,
+                 ReshapePattern, BroadcastPattern, CatPattern, ExtractPattern,
+                 PermutePattern, AddIPattern, SubIPattern, CmpIPattern,
+                 ShLIPattern, ShRIPattern, MulIPattern, DivIPattern, OrIPattern,
+                 XOrIPattern, AndIPattern, MaxIPattern, MinIPattern,
+                 RemIPattern, AbsIPattern, FloorPattern, CeilPattern,
+                 AbsFPattern, PrintTkoPattern, MoveOutOfCudaTileModule>(
+        typeConverter, context);
 
     target.addIllegalDialect<CudaTileDialect>();
     target.addLegalDialect<
