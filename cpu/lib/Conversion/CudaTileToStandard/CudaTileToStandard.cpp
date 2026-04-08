@@ -539,6 +539,18 @@ using RemIPattern =
 using AbsFPattern = ReplaceWithLinalg<cuda_tile::AbsFOp, linalg::AbsOp>;
 using CeilPattern = ReplaceWithLinalg<cuda_tile::CeilOp, linalg::CeilOp>;
 using FloorPattern = ReplaceWithLinalg<cuda_tile::FloorOp, linalg::FloorOp>;
+using Atan2Pattern = ConvertWithMap<cuda_tile::Atan2Op, math::Atan2Op>;
+using CoshPattern = ConvertWithMap<cuda_tile::CosHOp, math::CoshOp>;
+using CosPattern = ConvertWithMap<cuda_tile::CosOp, math::CosOp>;
+using ExpPattern = ReplaceWithLinalg<cuda_tile::ExpOp, linalg::ExpOp>;
+using Log2Pattern = ConvertWithMap<cuda_tile::Log2Op, math::Log2Op>;
+using LogPattern = ReplaceWithLinalg<cuda_tile::LogOp, linalg::LogOp>;
+using NegFPattern = ReplaceWithLinalg<cuda_tile::NegFOp, linalg::NegFOp>;
+using SinhPattern = ConvertWithMap<cuda_tile::SinHOp, math::SinhOp>;
+using SinPattern = ConvertWithMap<cuda_tile::SinOp, math::SinOp>;
+using TanPattern = ConvertWithMap<cuda_tile::TanOp, math::TanOp>;
+// TODO: specialize to square for pow 2
+using PowPattern = ReplaceWithLinalg<cuda_tile::PowOp, linalg::PowFOp>;
 
 struct PrintTkoPattern : public OpConversionPattern<cuda_tile::PrintTkoOp> {
   using OpConversionPattern<cuda_tile::PrintTkoOp>::OpConversionPattern;
