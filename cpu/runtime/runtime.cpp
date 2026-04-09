@@ -102,7 +102,6 @@ extern "C" void ct_cpu_print_str(const char *str) { std::cout << str; }
         DynamicMemRefType<TYPE>(UnrankedMemRefType<TYPE>{rank, descriptor}));  \
   }                                                                            \
   static_assert(true, "")
-// force semicolon ^
 
 CT_CPU_PRINT_MEMREF(i8, int8_t);
 CT_CPU_PRINT_MEMREF(i32, int32_t);

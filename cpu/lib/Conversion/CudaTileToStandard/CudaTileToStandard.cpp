@@ -61,6 +61,46 @@ private:
   // }
 };
 
+static std::optional<arith::RoundingMode>
+convertRoundingMode(cuda_tile::RoundingMode mode) {
+  using CTR = cuda_tile::RoundingMode;
+  using R = arith::RoundingMode;
+
+  switch (mode) {
+  case CTR::NEAREST_EVEN:
+    return R::to_nearest_even;
+  case CTR::ZERO:
+    return R::toward_zero;
+  case CTR::NEGATIVE_INF:
+    return R::downward;
+  case CTR::POSITIVE_INF:
+    return R::upward;
+  case CTR::APPROX:
+  case CTR::FULL:
+  case CTR::NEAREST_INT_TO_ZERO:
+  default:
+    // just using default rounding mode here. TODO: give error/warning?
+    return std::nullopt;
+  }
+}
+
+static arith::IntegerOverflowFlags
+convertOverflowFlags(cuda_tile::IntegerOverflow of) {
+  using OF = arith::IntegerOverflowFlags;
+  switch (of) {
+  case IntegerOverflow::NONE:
+    return OF::none;
+  case IntegerOverflow::NSW:
+    return OF::nsw;
+  case IntegerOverflow::NUW:
+    return OF::nuw;
+  case IntegerOverflow::NW:
+    return OF::nsw | OF::nuw;
+  default:
+    llvm_unreachable("invalid overflow flag");
+  }
+}
+
 struct EntryPattern : public OpConversionPattern<cuda_tile::EntryOp> {
   using OpConversionPattern<cuda_tile::EntryOp>::OpConversionPattern;
 
@@ -330,7 +370,7 @@ struct MaxIMinIPattern : public OpConversionPattern<T> {
     auto empty = tensor::EmptyOp::create(rewriter, op.getLoc(), opTy.getShape(),
                                          opTy.getElementType());
 
-    auto newOp = std::invoke([&]() -> Operation * {
+    auto newOp = [&]() -> Operation * {
       switch (signedness) {
       case Signedness::Unsigned:
         return linalg::MapOp::create(
@@ -348,7 +388,7 @@ struct MaxIMinIPattern : public OpConversionPattern<T> {
             "only unsigned and signed are valid"); // suppress warning because
                                                    // of templated class
       }
-    });
+    }();
 
     rewriter.replaceOp(op, newOp);
     return success();
@@ -367,7 +407,7 @@ struct SignedUnsignedPattern : public OpConversionPattern<T> {
     auto empty = tensor::EmptyOp::create(rewriter, op.getLoc(), opTy.getShape(),
                                          opTy.getElementType());
 
-    auto newOp = std::invoke([&]() -> Operation * {
+    auto newOp = [&]() -> Operation * {
       switch (signedness) {
       case Signedness::Unsigned:
         return linalg::MapOp::create(
@@ -388,7 +428,7 @@ struct SignedUnsignedPattern : public OpConversionPattern<T> {
             "only unsigned and signed are valid"); // suppress warning because
                                                    // of templated class
       }
-    });
+    }();
 
     rewriter.replaceOp(op, newOp);
     return success();
@@ -402,29 +442,29 @@ struct CmpIPattern : public OpConversionPattern<cuda_tile::CmpIOp> {
   matchAndRewrite(CmpIOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
 
-    auto cmpPred = std::invoke(
-        [&](cuda_tile::ComparisonPredicate pred, cuda_tile::Signedness sign) {
-          using A = arith::CmpIPredicate;
-          using S = cuda_tile::Signedness;
+    auto sign = op.getSignedness();
+    auto pred = op.getComparisonPredicate();
+    auto cmpPred = [&] {
+      using A = arith::CmpIPredicate;
+      using S = cuda_tile::Signedness;
 
-          switch (pred) {
-          case ComparisonPredicate::EQUAL:
-            return A::eq;
-          case ComparisonPredicate::NOT_EQUAL:
-            return A::ne;
-          case ComparisonPredicate::LESS_THAN:
-            return sign == S::Signed ? A::slt : A::ult;
-          case ComparisonPredicate::LESS_THAN_OR_EQUAL:
-            return sign == S::Signed ? A::sle : A::ule;
-          case ComparisonPredicate::GREATER_THAN:
-            return sign == S::Signed ? A::sgt : A::ugt;
-          case ComparisonPredicate::GREATER_THAN_OR_EQUAL:
-            return sign == S::Signed ? A::sge : A::uge;
-          default:
-            llvm_unreachable();
-          }
-        },
-        op.getComparisonPredicate(), op.getSignedness());
+      switch (pred) {
+      case ComparisonPredicate::EQUAL:
+        return A::eq;
+      case ComparisonPredicate::NOT_EQUAL:
+        return A::ne;
+      case ComparisonPredicate::LESS_THAN:
+        return sign == S::Signed ? A::slt : A::ult;
+      case ComparisonPredicate::LESS_THAN_OR_EQUAL:
+        return sign == S::Signed ? A::sle : A::ule;
+      case ComparisonPredicate::GREATER_THAN:
+        return sign == S::Signed ? A::sgt : A::ugt;
+      case ComparisonPredicate::GREATER_THAN_OR_EQUAL:
+        return sign == S::Signed ? A::sge : A::uge;
+      default:
+        llvm_unreachable();
+      }
+    }();
 
     auto opTy = op.getType();
     auto boolType = IntegerType::get(getContext(), 1);
@@ -456,7 +496,7 @@ struct DivIPattern : public OpConversionPattern<cuda_tile::DivIOp> {
 
     CreateMapOp createMap{rewriter, op.getLoc(), adaptor.getOperands(), empty};
 
-    auto newOp = std::invoke([&]() -> Operation * {
+    auto newOp = [&]() -> Operation * {
       using S = cuda_tile::Signedness;
       using RM = cuda_tile::RoundingMode;
 
@@ -477,7 +517,7 @@ struct DivIPattern : public OpConversionPattern<cuda_tile::DivIOp> {
       default:
         return nullptr;
       }
-    });
+    }();
 
     if (newOp == nullptr) {
       return rewriter.notifyMatchFailure(
@@ -507,6 +547,54 @@ private:
     ValueRange args;
     Value init;
   };
+};
+
+struct NegIPattern : public OpConversionPattern<cuda_tile::NegIOp> {
+  using OpConversionPattern<cuda_tile::NegIOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(cuda_tile::NegIOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) {
+
+    auto elemTy = op.getType().getElementType();
+    auto c0 = arith::ConstantIntOp::create(rewriter, op.getLoc(), elemTy, 0);
+
+    auto opTy = op.getType();
+    auto empty = tensor::EmptyOp::create(rewriter, op.getLoc(), opTy.getShape(),
+                                         opTy.getElementType());
+
+    rewriter.replaceOpWithNewOp<linalg::MapOp>(
+        op, adaptor.getOperands(), empty,
+        [&](OpBuilder &b, Location loc, ValueRange args) {
+          Value subOp = arith::SubIOp::create(
+              b, loc, args[0], c0, convertOverflowFlags(op.getOverflow()));
+          linalg::YieldOp::create(b, loc, subOp);
+        });
+
+    return success();
+  }
+};
+
+struct MulHiIPattern : public OpConversionPattern<cuda_tile::MulhiIOp> {
+  using OpConversionPattern<cuda_tile::MulhiIOp>::OpConversionPattern;
+  LogicalResult
+  matchAndRewrite(cuda_tile::MulhiIOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    // TODO optimization: if lower halve is also calculated with a regular mul
+    // op, remove it and just use the lower result of this op
+
+    auto opTy = op.getType();
+    auto empty = tensor::EmptyOp::create(rewriter, op.getLoc(), opTy.getShape(),
+                                         opTy.getElementType());
+    // according to the spec, this op is only defined for unsigned integers
+    rewriter.replaceOpWithNewOp<linalg::MapOp>(
+        op, adaptor.getOperands(), empty,
+        [&](OpBuilder &b, Location loc, ValueRange args) {
+          auto mulOp = arith::MulUIExtendedOp::create(b, loc, args[0], args[1]);
+          linalg::YieldOp::create(b, loc, mulOp.getHigh());
+        });
+
+    return success();
+  }
 };
 
 template <typename T, typename U>
@@ -542,7 +630,7 @@ struct ExtiPattern : public OpConversionPattern<cuda_tile::ExtIOp> {
   matchAndRewrite(cuda_tile::ExtIOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
 
-    auto newOp = std::invoke([&]() {
+    auto newOp = [&] {
       if (op.getSignedness() == Signedness::Signed) {
         return createConversionMapOp<cuda_tile::ExtIOp, arith::ExtSIOp>(
             op, adaptor, rewriter);
@@ -550,7 +638,7 @@ struct ExtiPattern : public OpConversionPattern<cuda_tile::ExtIOp> {
         return createConversionMapOp<cuda_tile::ExtIOp, arith::ExtUIOp>(
             op, adaptor, rewriter);
       }
-    });
+    }();
 
     rewriter.replaceOp(op, newOp);
     return success();
@@ -570,7 +658,7 @@ struct FToIPattern : public OpConversionPattern<cuda_tile::FToIOp> {
               "rounding mode for this op");
     }
 
-    auto newOp = std::invoke([&]() {
+    auto newOp = [&] {
       if (op.getSignedness() == Signedness::Signed) {
         return createConversionMapOp<cuda_tile::FToIOp, arith::FPToSIOp>(
             op, adaptor, rewriter);
@@ -578,52 +666,12 @@ struct FToIPattern : public OpConversionPattern<cuda_tile::FToIOp> {
         return createConversionMapOp<cuda_tile::FToIOp, arith::FPToUIOp>(
             op, adaptor, rewriter);
       }
-    });
+    }();
 
     rewriter.replaceOp(op, newOp);
     return success();
   }
 };
-
-static std::optional<arith::RoundingMode>
-convertRoundingMode(cuda_tile::RoundingMode mode) {
-  using CTR = cuda_tile::RoundingMode;
-  using R = arith::RoundingMode;
-
-  switch (mode) {
-  case CTR::NEAREST_EVEN:
-    return R::to_nearest_even;
-  case CTR::ZERO:
-    return R::toward_zero;
-  case CTR::NEGATIVE_INF:
-    return R::downward;
-  case CTR::POSITIVE_INF:
-    return R::upward;
-  case CTR::APPROX:
-  case CTR::FULL:
-  case CTR::NEAREST_INT_TO_ZERO:
-  default:
-    // just using default rounding mode here. TODO: give error/warning?
-    return std::nullopt;
-  }
-}
-
-static arith::IntegerOverflowFlags
-convertOverflowFlags(cuda_tile::IntegerOverflow of) {
-  using OF = arith::IntegerOverflowFlags;
-  switch (of) {
-  case IntegerOverflow::NONE:
-    return OF::none;
-  case IntegerOverflow::NSW:
-    return OF::nsw;
-  case IntegerOverflow::NUW:
-    return OF::nuw;
-  case IntegerOverflow::NW:
-    return OF::nsw | OF::nuw;
-  default:
-    llvm_unreachable("invalid overflow flag");
-  }
-}
 
 struct FToFPattern : public OpConversionPattern<cuda_tile::FToFOp> {
   using OpConversionPattern<cuda_tile::FToFOp>::OpConversionPattern;
@@ -655,7 +703,7 @@ struct FToFPattern : public OpConversionPattern<cuda_tile::FToFOp> {
     auto opTy = op.getType();
     auto empty = tensor::EmptyOp::create(rewriter, op.getLoc(), opTy.getShape(),
                                          opTy.getElementType());
-    auto newOp = std::invoke([&]() {
+    auto newOp = [&] {
       if (fromWidth > toWidth) {
         return linalg::MapOp::create(
             rewriter, op.getLoc(), adaptor.getFrom(), empty,
@@ -678,7 +726,7 @@ struct FToFPattern : public OpConversionPattern<cuda_tile::FToFOp> {
               linalg::YieldOp::create(b, loc, truncOp);
             });
       }
-    });
+    }();
 
     rewriter.replaceOp(op, newOp);
     return success();
@@ -697,7 +745,7 @@ struct IToFPattern : public OpConversionPattern<cuda_tile::IToFOp> {
     // TODO: rounding mode? these arith ops don't support it
 
     auto sign = op.getSignedness();
-    auto newOp = std::invoke([&]() {
+    auto newOp = [&] {
       if (sign == Signedness::Signed) {
         return createConversionMapOp<cuda_tile::IToFOp, arith::SIToFPOp>(
             op, adaptor, rewriter);
@@ -705,7 +753,7 @@ struct IToFPattern : public OpConversionPattern<cuda_tile::IToFOp> {
         return createConversionMapOp<cuda_tile::IToFOp, arith::UIToFPOp>(
             op, adaptor, rewriter);
       }
-    });
+    }();
 
     rewriter.replaceOp(op, newOp);
     return success();
@@ -907,11 +955,12 @@ struct ConvertCudaTileToStandard
         .add<EntryPattern, ReturnPattern, ConstantPattern, IotaPattern,
              ReshapePattern, BroadcastPattern, CatPattern, ExtractPattern,
              PermutePattern, AddIPattern, SubIPattern, CmpIPattern, ShLIPattern,
-             ShRIPattern, MulIPattern, DivIPattern, OrIPattern, XOrIPattern,
-             AndIPattern, MaxIPattern, MinIPattern, RemIPattern, AbsIPattern,
-             FloorPattern, CeilPattern, AbsFPattern, BitcastPattern,
-             ExtiPattern, FToIPattern, FToFPattern, IToFPattern, TruncIPattern,
-             PrintTkoPattern, MoveOutOfCudaTileModule>(typeConverter, context);
+             ShRIPattern, MulIPattern, DivIPattern, NegIPattern, MulHiIPattern,
+             OrIPattern, XOrIPattern, AndIPattern, MaxIPattern, MinIPattern,
+             RemIPattern, AbsIPattern, FloorPattern, CeilPattern, AbsFPattern,
+             BitcastPattern, ExtiPattern, FToIPattern, FToFPattern, IToFPattern,
+             TruncIPattern, PrintTkoPattern, MoveOutOfCudaTileModule>(
+            typeConverter, context);
 
     target.addIllegalDialect<CudaTileDialect>();
     target.addLegalDialect<
