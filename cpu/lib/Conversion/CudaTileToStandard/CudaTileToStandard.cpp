@@ -395,6 +395,33 @@ struct MaxIMinIPattern : public OpConversionPattern<T> {
   }
 };
 
+template <typename T, typename PropOp, typename NoPropOp>
+struct MaxFMinFPattern : public OpConversionPattern<T> {
+  using OpConversionPattern<T>::OpConversionPattern;
+  // ignore ftz
+  LogicalResult
+  matchAndRewrite(T op, typename T::Adaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto opTy = op.getType();
+    auto empty = tensor::EmptyOp::create(rewriter, op.getLoc(), opTy.getShape(),
+                                         opTy.getElementType());
+
+    if (op.getPropagateNan()) {
+      rewriter.replaceOpWithNewOp<PropOp>(op, adaptor.getOperands(),
+                                          ValueRange{empty});
+    } else {
+      rewriter.replaceOpWithNewOp<linalg::MapOp>(
+          op, adaptor.getOperands(), empty,
+          [](OpBuilder &b, Location loc, ValueRange args) {
+            Value mapOp = NoPropOp::create(b, loc, args.drop_back());
+            linalg::YieldOp::create(b, loc, mapOp);
+          });
+    }
+
+    return success();
+  }
+};
+
 template <typename T, typename SignedOp, typename UnsignedOp>
 struct SignedUnsignedPattern : public OpConversionPattern<T> {
   using OpConversionPattern<T>::OpConversionPattern;
@@ -784,6 +811,53 @@ struct TruncIPattern : public OpConversionPattern<cuda_tile::TruncIOp> {
   }
 };
 
+struct CmpFPattern : public OpConversionPattern<cuda_tile::CmpFOp> {
+  using OpConversionPattern<cuda_tile::CmpFOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(cuda_tile::CmpFOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+
+    auto pred = op.getComparisonPredicate();
+    auto ord = op.getComparisonOrdering();
+    auto arithPred = [&] {
+      using A = arith::CmpFPredicate;
+      using CTA = cuda_tile::ComparisonPredicate;
+      using O = cuda_tile::ComparisonOrdering;
+
+      switch (pred) {
+      case CTA::LESS_THAN:
+        return ord == O::ORDERED ? A::OLT : A::ULT;
+      case CTA::LESS_THAN_OR_EQUAL:
+        return ord == O::ORDERED ? A::OLE : A::ULE;
+      case CTA::GREATER_THAN:
+        return ord == O::ORDERED ? A::OGT : A::UGT;
+      case CTA::GREATER_THAN_OR_EQUAL:
+        return ord == O::ORDERED ? A::OGE : A::UGE;
+      case CTA::EQUAL:
+        return ord == O::ORDERED ? A::OEQ : A::UEQ;
+      case CTA::NOT_EQUAL:
+        return ord == O::ORDERED ? A::ONE : A::UNE;
+      default:
+        llvm_unreachable();
+      }
+    }();
+
+    auto opTy = op.getType();
+    auto empty = tensor::EmptyOp::create(rewriter, op.getLoc(), opTy.getShape(),
+                                         opTy.getElementType());
+    rewriter.replaceOpWithNewOp<linalg::MapOp>(
+        op, adaptor.getOperands(), empty,
+        [&](OpBuilder &b, Location loc, ValueRange args) {
+          Value cmp =
+              arith::CmpFOp::create(b, loc, arithPred, args[0], args[1]);
+          linalg::YieldOp::create(b, loc, cmp);
+        });
+
+    return success();
+  }
+};
+
 // bitwise
 using AndIPattern = ConvertWithMap<cuda_tile::AndIOp, arith::AndIOp>;
 
@@ -826,6 +900,30 @@ using SinPattern = ConvertWithMap<cuda_tile::SinOp, math::SinOp>;
 using TanPattern = ConvertWithMap<cuda_tile::TanOp, math::TanOp>;
 // TODO: specialize to square for pow 2
 using PowPattern = ReplaceWithLinalg<cuda_tile::PowOp, linalg::PowFOp>;
+using AddFPattern = ReplaceWithLinalg<cuda_tile::AddFOp,
+                                      linalg::AddOp>; // ignore rounding and ftz
+using DivFPattern = ReplaceWithLinalg<cuda_tile::DivFOp,
+                                      linalg::DivOp>; // ignore rounding and ftz
+using Exp2Pattern =
+    ConvertWithMap<cuda_tile::Exp2Op, math::Exp2Op>; // ignore ftz
+using FmaPattern =
+    ConvertWithMap<cuda_tile::FmaOp, math::FmaOp>; // ignore rounding and ftz
+using MaxFPattern =
+    MaxFMinFPattern<cuda_tile::MaxFOp, linalg::MaxOp, arith::MaxNumFOp>;
+using MinFPattern =
+    MaxFMinFPattern<cuda_tile::MinFOp, linalg::MinOp, arith::MinNumFOp>;
+using MulFPattern = ReplaceWithLinalg<cuda_tile::MulFOp,
+                                      linalg::MulOp>; // ignore rounding and ftz
+using RsqrtPattern =
+    ReplaceWithLinalg<cuda_tile::RsqrtOp, linalg::RsqrtOp>; // ingore ftz
+using SubFPattern = ReplaceWithLinalg<cuda_tile::SubFOp,
+                                      linalg::SubOp>; // ignore rounding and ftz
+using SqrtPattern =
+    ReplaceWithLinalg<cuda_tile::SqrtOp,
+                      linalg::SqrtOp>; // ignore rounding and ftz
+using TanHPattern =
+    ReplaceWithLinalg<cuda_tile::TanHOp, linalg::TanhOp>; // ignore rounding
+using RemFPattern = ConvertWithMap<cuda_tile::RemFOp, arith::RemFOp>;
 
 struct PrintTkoPattern : public OpConversionPattern<cuda_tile::PrintTkoOp> {
   using OpConversionPattern<cuda_tile::PrintTkoOp>::OpConversionPattern;
@@ -958,9 +1056,13 @@ struct ConvertCudaTileToStandard
              ShRIPattern, MulIPattern, DivIPattern, NegIPattern, MulHiIPattern,
              OrIPattern, XOrIPattern, AndIPattern, MaxIPattern, MinIPattern,
              RemIPattern, AbsIPattern, FloorPattern, CeilPattern, AbsFPattern,
-             BitcastPattern, ExtiPattern, FToIPattern, FToFPattern, IToFPattern,
-             TruncIPattern, PrintTkoPattern, MoveOutOfCudaTileModule>(
-            typeConverter, context);
+             Atan2Pattern, CoshPattern, CosPattern, ExpPattern, Log2Pattern,
+             NegFPattern, SinhPattern, SinPattern, TanPattern, PowPattern,
+             AddFPattern, DivFPattern, Exp2Pattern, FmaPattern, MaxFPattern,
+             MinFPattern, RsqrtPattern, SqrtPattern, SqrtPattern, TanHPattern,
+             RemFPattern, BitcastPattern, ExtiPattern, FToIPattern, FToFPattern,
+             IToFPattern, TruncIPattern, PrintTkoPattern,
+             MoveOutOfCudaTileModule>(typeConverter, context);
 
     target.addIllegalDialect<CudaTileDialect>();
     target.addLegalDialect<
