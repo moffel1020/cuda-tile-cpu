@@ -793,7 +793,6 @@ struct TruncIPattern : public OpConversionPattern<cuda_tile::TruncIOp> {
   LogicalResult
   matchAndRewrite(cuda_tile::TruncIOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-
     auto opTy = op.getType();
     auto empty = tensor::EmptyOp::create(rewriter, op.getLoc(), opTy.getShape(),
                                          opTy.getElementType());
@@ -855,6 +854,78 @@ struct CmpFPattern : public OpConversionPattern<cuda_tile::CmpFOp> {
         });
 
     return success();
+  }
+};
+
+struct MmaIPattern : public OpConversionPattern<cuda_tile::MmaIOp> {
+  using OpConversionPattern<cuda_tile::MmaIOp>::OpConversionPattern;
+  LogicalResult
+  matchAndRewrite(cuda_tile::MmaIOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    // lhs and rhs must be i8 and acc must be i32 according to spec
+
+    auto extendIn = [&](auto val, cuda_tile::Signedness sign) -> Operation * {
+      auto valTy = cast<TensorType>(val.getType());
+      auto empty = tensor::EmptyOp::create(
+          rewriter, op.getLoc(), valTy.getShape(), rewriter.getI32Type());
+
+      if (sign == Signedness::Signed) {
+        return linalg::MapOp::create(
+            rewriter, op.getLoc(), val, empty,
+            [](OpBuilder &b, Location loc, ValueRange args) {
+              Value extOp =
+                  arith::ExtSIOp::create(b, loc, b.getI32Type(), args[0]);
+              linalg::YieldOp::create(b, loc, extOp);
+            });
+      } else {
+        return linalg::MapOp::create(
+            rewriter, op.getLoc(), val, empty,
+            [](OpBuilder &b, Location loc, ValueRange args) {
+              Value extOp =
+                  arith::ExtUIOp::create(b, loc, b.getI32Type(), args[0]);
+              linalg::YieldOp::create(b, loc, extOp);
+            });
+      }
+    };
+
+    Value left =
+        extendIn(adaptor.getLhs(), op.getSignednessLhs())->getResult(0);
+    Value right =
+        extendIn(adaptor.getRhs(), op.getSignednessRhs())->getResult(0);
+
+    auto rank = op.getType().getRank();
+    if (rank == 2) {
+      rewriter.replaceOpWithNewOp<linalg::MatmulOp>(
+          op, ValueRange{left, right}, ValueRange{adaptor.getAcc()});
+      return success();
+    } else if (rank == 3) {
+      rewriter.replaceOpWithNewOp<linalg::BatchMatmulOp>(
+          op, ValueRange{left, right}, ValueRange{adaptor.getAcc()});
+      return success();
+    }
+
+    return failure();
+  }
+};
+
+struct MmaFPattern : public OpConversionPattern<cuda_tile::MmaFOp> {
+  using OpConversionPattern<cuda_tile::MmaFOp>::OpConversionPattern;
+  LogicalResult
+  matchAndRewrite(cuda_tile::MmaFOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    // TODO: we can use matvec op sometimes
+    auto rank = op.getType().getRank();
+    if (rank == 2) {
+      rewriter.replaceOpWithNewOp<linalg::MatmulOp>(
+          op, ValueRange{adaptor.getLhs(), adaptor.getRhs()}, adaptor.getAcc());
+      return success();
+    } else if (rank == 3) {
+      rewriter.replaceOpWithNewOp<linalg::BatchMatmulOp>(
+          op, ValueRange{adaptor.getLhs(), adaptor.getRhs()}, adaptor.getAcc());
+      return success();
+    }
+
+    return failure();
   }
 };
 
@@ -1060,9 +1131,9 @@ struct ConvertCudaTileToStandard
              NegFPattern, SinhPattern, SinPattern, TanPattern, PowPattern,
              AddFPattern, DivFPattern, Exp2Pattern, FmaPattern, MaxFPattern,
              MinFPattern, RsqrtPattern, SqrtPattern, SqrtPattern, TanHPattern,
-             RemFPattern, BitcastPattern, ExtiPattern, FToIPattern, FToFPattern,
-             IToFPattern, TruncIPattern, PrintTkoPattern,
-             MoveOutOfCudaTileModule>(typeConverter, context);
+             RemFPattern, MmaFPattern, BitcastPattern, ExtiPattern, FToIPattern,
+             FToFPattern, IToFPattern, TruncIPattern, MmaIPattern,
+             PrintTkoPattern, MoveOutOfCudaTileModule>(typeConverter, context);
 
     target.addIllegalDialect<CudaTileDialect>();
     target.addLegalDialect<
