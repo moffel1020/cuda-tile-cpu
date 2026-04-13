@@ -270,8 +270,6 @@ struct ExtractPattern : public OpConversionPattern<cuda_tile::ExtractOp> {
     for (auto [size, idx] : llvm::zip(resShape, adaptor.getIndices())) {
       auto shapeSizeOp =
           arith::ConstantIndexOp::create(rewriter, op.getLoc(), /*value=*/size);
-      llvm::errs() << "shape size: " << resShape.size()
-                   << " indices size: " << adaptor.getIndices().size() << "\n";
       // TODO: check if this unpack is optimized away, if not try creating
       // scalar constants and then doing tensor.from_elements for other users
       auto unpackedIdx =
@@ -282,8 +280,6 @@ struct ExtractPattern : public OpConversionPattern<cuda_tile::ExtractOp> {
       offsets.emplace_back(arith::MulIOp::create(
           rewriter, op.getLoc(), shapeSizeOp, castedUnpackedIdx));
     }
-
-    llvm::errs() << "offsets size: " << offsets.size() << '\n';
 
     auto newOp = tensor::ExtractSliceOp::create(
         rewriter, op.getLoc(), resType, adaptor.getSource(),
@@ -1081,6 +1077,54 @@ private:
   }
 };
 
+struct YieldPattern : public OpConversionPattern<cuda_tile::YieldOp> {
+  using OpConversionPattern<cuda_tile::YieldOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(cuda_tile::YieldOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto parent = op->getParentOp();
+    if (dyn_cast<scf::IfOp>(*parent)) {
+      rewriter.replaceOpWithNewOp<scf::YieldOp>(op, adaptor.getOperands());
+      return success();
+    }
+
+    return failure();
+  }
+};
+
+struct IfPattern : public OpConversionPattern<cuda_tile::IfOp> {
+  using OpConversionPattern<cuda_tile::IfOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(cuda_tile::IfOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    // the original condition is in a tile, we just want the scalar
+    auto cond = tensor::ExtractOp::create(rewriter, op.getLoc(),
+                                          adaptor.getCondition(), {});
+
+    SmallVector<Type> types;
+    if (getTypeConverter()
+            ->convertTypes(op->getResultTypes(), types)
+            .failed()) {
+      return failure();
+    }
+
+    auto newOp =
+        scf::IfOp::create(rewriter, op.getLoc(), types, cond, false, false);
+    rewriter.inlineRegionBefore(op.getThenRegion(), newOp.getThenRegion(),
+                                newOp.getThenRegion().end());
+
+    if (op.getElseBlock() != nullptr) {
+      rewriter.inlineRegionBefore(op.getElseRegion(), newOp.getElseRegion(),
+                                  newOp.getElseRegion().end());
+    }
+
+    rewriter.replaceOp(op, newOp);
+    return success();
+  }
+};
+
 struct MoveOutOfCudaTileModule
     : public OpConversionPattern<cuda_tile::ModuleOp> {
   using OpConversionPattern<cuda_tile::ModuleOp>::OpConversionPattern;
@@ -1132,15 +1176,16 @@ struct ConvertCudaTileToStandard
              AddFPattern, DivFPattern, Exp2Pattern, FmaPattern, MaxFPattern,
              MinFPattern, RsqrtPattern, SqrtPattern, SqrtPattern, TanHPattern,
              RemFPattern, MmaFPattern, BitcastPattern, ExtiPattern, FToIPattern,
-             FToFPattern, IToFPattern, TruncIPattern, MmaIPattern,
-             PrintTkoPattern, MoveOutOfCudaTileModule>(typeConverter, context);
+             FToFPattern, IToFPattern, TruncIPattern, MmaIPattern, YieldPattern,
+             IfPattern, PrintTkoPattern, MoveOutOfCudaTileModule>(typeConverter,
+                                                                  context);
 
     target.addIllegalDialect<CudaTileDialect>();
     target.addLegalDialect<
         arith::ArithDialect, func::FuncDialect, memref::MemRefDialect,
         bufferization::BufferizationDialect, linalg::LinalgDialect,
         tensor::TensorDialect, math::MathDialect, ptr::PtrDialect,
-        cuda_tile::cpu::CudaTileCPUDialect>();
+        scf::SCFDialect, cuda_tile::cpu::CudaTileCPUDialect>();
 
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(
         patterns, typeConverter);

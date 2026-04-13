@@ -74,6 +74,7 @@ private:
 
     return funcOp;
   }
+
   static LLVM::LLVMFuncOp
   getOrCreateStrPrintFunc(ConversionPatternRewriter &rewriter, ModuleOp mod) {
     auto *context = mod.getContext();
@@ -104,8 +105,7 @@ private:
               default:
                 return "unimplemented"; // TODO: proper error here
               }
-            })
-            .DefaultUnreachable();
+            });
 
     // fn (const char* str, struct {int64_t rank, void *descriptor} )
     auto *ctx = mod.getContext();
