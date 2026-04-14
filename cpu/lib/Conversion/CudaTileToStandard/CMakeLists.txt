@@ -1,5 +1,6 @@
 add_mlir_conversion_library(CudaTileToStandard
   CudaTileToStandard.cpp
+  LowerCudaTileCPUMemOps.cpp
 
   DEPENDS
   CudaTileToStandardPassIncGen
