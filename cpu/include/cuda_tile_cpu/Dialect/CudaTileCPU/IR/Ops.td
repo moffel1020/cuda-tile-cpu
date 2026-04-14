@@ -22,7 +22,10 @@ def CudaTileCPU_PrintOp : CudaTileCPU_Op<"print"> {
 def CudaTileCPU_LoadPtrOp : CudaTileCPU_Op<"load_ptr"> {
   let summary = "Make a memref from a cuda_tile.ptr";
 
-  let arguments = (ins CudaTileCPU_PointerType:$source); // todo: mask, padding?
+  let arguments = (ins RankedTensorOf<[CudaTileCPU_PointerType]>:$source); // TODO: mask, padding?
+  let results = (outs AnyRankedTensor:$result); // TODO: could verify type
+
+  let assemblyFormat = "$source attr-dict `:` type($source) `->` type($result)";
 }
 
 #endif
