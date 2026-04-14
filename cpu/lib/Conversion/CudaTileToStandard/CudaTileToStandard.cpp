@@ -1,6 +1,7 @@
 #include "cuda_tile/Dialect/CudaTile/IR/Ops.h"
 #include "cuda_tile_cpu/Conversion/CudaTileToStandard/Passes.h"
 #include "cuda_tile_cpu/Dialect/CudaTileCPU/IR/Dialect.h"
+#include "cuda_tile_cpu/Dialect/CudaTileCPU/IR/Types.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -40,10 +41,6 @@ public:
     addConversion([](Type type) { return type; });
 
     addConversion([&](cuda_tile::TileType type) -> Type {
-      // if (auto ptrType =
-      //         dyn_cast<cuda_tile::PointerType>(type.getElementType())) {
-      //   return convertCudaTilePtrToPtr(ptrType);
-      // }
       return convertTileToTensor(type);
     });
   }
@@ -52,13 +49,16 @@ private:
   Type convertTileToTensor(cuda_tile::TileType type) const {
     auto shape = type.getShape();
     Type elementType = type.getElementType();
+    if (auto ptrType = dyn_cast<cuda_tile::PointerType>(elementType)) {
+      elementType = convertCudaTilePtr(ptrType);
+    }
     return RankedTensorType::get(shape, elementType);
   }
 
-  // Type convertCudaTilePtrToPtr(cuda_tile::PointerType ptrType) const {
-  //   return
-  //   ptr::PtrType::get(ptr::GenericSpaceAttr::get(ptrType.getContext()));
-  // }
+  Type convertCudaTilePtr(cuda_tile::PointerType ptrType) const {
+    auto pointee = ptrType.getPointeeType();
+    return cpu::PointerType::get(pointee.getContext(), pointee);
+  }
 };
 
 static std::optional<arith::RoundingMode>
@@ -1131,7 +1131,10 @@ struct LoadPtrTkoPattern : public OpConversionPattern<cuda_tile::LoadPtrTkoOp> {
   LogicalResult
   matchAndRewrite(cuda_tile::LoadPtrTkoOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    
+
+    auto loadOp =
+        cpu::LoadPtrOp::create(rewriter, op.getLoc(), adaptor.getSource());
+    rewriter.replaceOp(op, loadOp);
     return success();
   }
 };
@@ -1188,8 +1191,8 @@ struct ConvertCudaTileToStandard
              MinFPattern, RsqrtPattern, SqrtPattern, SqrtPattern, TanHPattern,
              RemFPattern, MmaFPattern, BitcastPattern, ExtiPattern, FToIPattern,
              FToFPattern, IToFPattern, TruncIPattern, MmaIPattern, YieldPattern,
-             IfPattern, PrintTkoPattern, MoveOutOfCudaTileModule>(typeConverter,
-                                                                  context);
+             IfPattern, PrintTkoPattern, LoadPtrTkoPattern,
+             MoveOutOfCudaTileModule>(typeConverter, context);
 
     target.addIllegalDialect<CudaTileDialect>();
     target.addLegalDialect<

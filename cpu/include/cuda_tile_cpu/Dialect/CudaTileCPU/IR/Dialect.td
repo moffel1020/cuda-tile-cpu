@@ -3,7 +3,7 @@
 
 include "mlir/IR/OpBase.td"
 
-def CudaTileCPU_Dialect: Dialect {
+def CudaTileCPU_Dialect : Dialect {
   let name = "cuda_tile_cpu";
   let summary = "Cuda Tile intermediate CPU dialect.";
   let cppNamespace = "::mlir::cuda_tile::cpu";
@@ -21,6 +21,8 @@ def CudaTileCPU_Dialect: Dialect {
   private:
     void registerTypes();
   }];
+
+  let useDefaultTypePrinterParser = 1;
 }
 
 #endif
