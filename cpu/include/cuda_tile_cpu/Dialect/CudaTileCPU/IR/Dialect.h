@@ -7,6 +7,8 @@
 #include "mlir/IR/Value.h"
 #include "mlir/Support/LLVM.h"
 
+#include "cuda_tile_cpu/Dialect/CudaTileCPU/IR/Types.h"
+
 #define GET_OP_CLASSES
 #include "cuda_tile_cpu/Dialect/CudaTileCPU/IR/Ops.h.inc"
 

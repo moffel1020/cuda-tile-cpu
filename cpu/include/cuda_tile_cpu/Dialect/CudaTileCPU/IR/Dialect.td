@@ -16,6 +16,11 @@ def CudaTileCPU_Dialect: Dialect {
     "cuda_tile::CudaTileDialect",
     "mlir::memref::MemRefDialect",
   ];
+
+  let extraClassDeclaration = [{
+  private:
+    void registerTypes();
+  }];
 }
 
 #endif

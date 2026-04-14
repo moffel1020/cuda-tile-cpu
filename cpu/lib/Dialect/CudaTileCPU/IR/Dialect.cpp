@@ -8,6 +8,7 @@ using namespace mlir::cuda_tile;
 using namespace mlir::cuda_tile::cpu;
 
 void CudaTileCPUDialect::initialize() {
+  registerTypes();
   addOperations<
 #define GET_OP_LIST
 #include "cuda_tile_cpu/Dialect/CudaTileCPU/IR/Ops.cpp.inc"

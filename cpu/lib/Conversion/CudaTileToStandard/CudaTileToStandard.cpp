@@ -1125,6 +1125,17 @@ struct IfPattern : public OpConversionPattern<cuda_tile::IfOp> {
   }
 };
 
+struct LoadPtrTkoPattern : public OpConversionPattern<cuda_tile::LoadPtrTkoOp> {
+  using OpConversionPattern<cuda_tile::LoadPtrTkoOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(cuda_tile::LoadPtrTkoOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    
+    return success();
+  }
+};
+
 struct MoveOutOfCudaTileModule
     : public OpConversionPattern<cuda_tile::ModuleOp> {
   using OpConversionPattern<cuda_tile::ModuleOp>::OpConversionPattern;
