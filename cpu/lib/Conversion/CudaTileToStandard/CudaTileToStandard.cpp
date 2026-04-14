@@ -199,11 +199,13 @@ struct BroadcastPattern : public OpConversionPattern<cuda_tile::BroadcastOp> {
     AffineMap outputMap = AffineMap::getMultiDimIdentityMap(
         opTy.getRank(), rewriter.getContext());
 
+    auto newTy = cast<RankedTensorType>(getTypeConverter()->convertType(opTy));
     SmallVector<utils::IteratorType> iterators(rank,
                                                utils::IteratorType::parallel);
 
-    auto empty = tensor::EmptyOp::create(rewriter, op.getLoc(), opTy.getShape(),
-                                         opTy.getElementType());
+    auto empty = tensor::EmptyOp::create(
+        rewriter, op.getLoc(), newTy.getShape(), newTy.getElementType());
+
     auto newOp = linalg::GenericOp::create(
         rewriter, op.getLoc(), empty.getType(), adaptor.getOperands(), {empty},
         {inputMap, outputMap}, iterators,
@@ -237,9 +239,20 @@ struct ReshapePattern : public OpConversionPattern<cuda_tile::ReshapeOp> {
   LogicalResult
   matchAndRewrite(cuda_tile::ReshapeOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    auto tensorType = getTypeConverter()->convertType(op.getType());
+    auto tensorType =
+        cast<RankedTensorType>(getTypeConverter()->convertType(op.getType()));
+
+    auto shapeType =
+        RankedTensorType::get({tensorType.getRank()}, rewriter.getIndexType());
+    SmallVector<APInt> values =
+        llvm::map_to_vector(tensorType.getShape(), [](int64_t val) {
+          return APInt{64, (uint64_t)val};
+        });
+
+    auto attr = DenseElementsAttr::get(shapeType, values);
+    auto shape = arith::ConstantOp::create(rewriter, op.getLoc(), attr);
     rewriter.replaceOpWithNewOp<tensor::ReshapeOp>(op, tensorType,
-                                                   adaptor.getSource());
+                                                   adaptor.getSource(), shape);
     return success();
   }
 };
@@ -1132,8 +1145,9 @@ struct LoadPtrTkoPattern : public OpConversionPattern<cuda_tile::LoadPtrTkoOp> {
   matchAndRewrite(cuda_tile::LoadPtrTkoOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
 
-    auto loadOp =
-        cpu::LoadPtrOp::create(rewriter, op.getLoc(), adaptor.getSource());
+    auto tensorTy = getTypeConverter()->convertType(op.getResult());
+    auto loadOp = cpu::LoadPtrOp::create(rewriter, op.getLoc(), tensorTy,
+                                         adaptor.getSource());
     rewriter.replaceOp(op, loadOp);
     return success();
   }
