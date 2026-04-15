@@ -56,8 +56,7 @@ private:
   }
 
   Type convertCudaTilePtr(cuda_tile::PointerType ptrType) const {
-    auto pointee = ptrType.getPointeeType();
-    return cpu::PointerType::get(pointee.getContext(), pointee);
+    return IntegerType::get(ptrType.getContext(), 64);
   }
 };
 
@@ -1145,10 +1144,18 @@ struct LoadPtrTkoPattern : public OpConversionPattern<cuda_tile::LoadPtrTkoOp> {
   matchAndRewrite(cuda_tile::LoadPtrTkoOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
 
-    auto tensorTy = getTypeConverter()->convertType(op.getResult());
-    auto loadOp = cpu::LoadPtrOp::create(rewriter, op.getLoc(), tensorTy,
-                                         adaptor.getSource());
-    rewriter.replaceOp(op, loadOp);
+    auto ptrTy = getTypeConverter()->convertType(op.getResult());
+    if (dyn_cast<RankedTensorType>(ptrTy)) {
+      auto loadOp = cpu::LoadPtrTileOp::create(rewriter, op.getLoc(), ptrTy,
+                                               adaptor.getSource());
+      rewriter.replaceOp(op, loadOp);
+    } else {
+      auto elemTy = cast<TileType>(op.getResult().getType()).getElementType();
+      auto loadOp = cpu::LoadPtrOp::create(rewriter, op.getLoc(), elemTy,
+                                           adaptor.getSource());
+      rewriter.replaceOp(op, loadOp);
+    }
+
     return success();
   }
 };
@@ -1212,8 +1219,8 @@ struct ConvertCudaTileToStandard
     target.addLegalDialect<
         arith::ArithDialect, func::FuncDialect, memref::MemRefDialect,
         bufferization::BufferizationDialect, linalg::LinalgDialect,
-        tensor::TensorDialect, math::MathDialect, ptr::PtrDialect,
-        scf::SCFDialect, cuda_tile::cpu::CudaTileCPUDialect>();
+        tensor::TensorDialect, math::MathDialect, scf::SCFDialect,
+        cuda_tile::cpu::CudaTileCPUDialect>();
 
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(
         patterns, typeConverter);

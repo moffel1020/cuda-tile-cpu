@@ -6,6 +6,8 @@ include "mlir/IR/OpBase.td"
 include "cuda_tile_cpu/Dialect/CudaTileCPU/IR/Dialect.td"
 include "cuda_tile_cpu/Dialect/CudaTileCPU/IR/Types.td"
 
+include "cuda_tile/Dialect/CudaTile/IR/Types.td"
+
 class CudaTileCPU_Op<string mnemonic, list<Trait> traits = []> :
   Op<CudaTileCPU_Dialect, mnemonic, !listconcat(traits, [])> {}
 
@@ -19,13 +21,22 @@ def CudaTileCPU_PrintOp : CudaTileCPU_Op<"print"> {
   }];
 }
 
-def CudaTileCPU_LoadPtrOp : CudaTileCPU_Op<"load_ptr"> {
-  let summary = "Make a memref from a cuda_tile.ptr";
+def CudaTileCPU_LoadPtrTileOp : CudaTileCPU_Op<"load_ptr_tile"> {
+  let summary = "load a tensor from a tensor of pointers";
 
-  let arguments = (ins RankedTensorOf<[CudaTileCPU_PointerType]>:$source); // TODO: mask, padding?
+  let arguments = (ins RankedTensorOf<[I64]>:$source); // TODO: mask, padding?
   let results = (outs AnyRankedTensor:$result); // TODO: could verify type
 
   let assemblyFormat = "$source attr-dict `:` type($source) `->` type($result)";
+}
+
+def CudaTileCPU_LoadPtrOp : CudaTileCPU_Op<"load_ptr"> {
+  let summary = "load a scalar from a pointer";
+
+  let arguments = (ins I64:$source);
+  let results = (outs CudaTile_NumberType:$result);
+
+  let assemblyFormat = "$source attr-dict `:` qualified(type($source)) `->` type($result)";
 }
 
 #endif

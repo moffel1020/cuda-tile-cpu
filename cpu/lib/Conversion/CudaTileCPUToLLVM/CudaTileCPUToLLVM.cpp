@@ -1,7 +1,11 @@
 #include "cuda_tile_cpu/Conversion/CudaTileCPUToLLVM/Passes.h"
 #include "cuda_tile_cpu/Dialect/CudaTileCPU/IR/Dialect.h"
+#include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
+#include "mlir/Conversion/FuncToLLVM/ConvertFuncToLLVM.h"
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
+#include "mlir/Conversion/MemRefToLLVM/MemRefToLLVM.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
 
@@ -36,7 +40,6 @@ struct PrintPattern : public OpConversionPattern<cpu::PrintOp> {
     auto loc = op.getLoc();
     auto mod = op->getParentOfType<ModuleOp>();
     auto *context = rewriter.getContext();
-    auto ptrTy = LLVM::LLVMPointerType::get(context);
 
     std::string strTerminated = op.getStr().str() + '\0';
     mlir::Value printStr = LLVM::createGlobalString(
@@ -125,6 +128,24 @@ private:
   inline static int strCounter = 0; // thread safety? whats that
 };
 
+struct LoadPtrPattern : public OpConversionPattern<cpu::LoadPtrOp> {
+  using OpConversionPattern<cpu::LoadPtrOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(cpu::LoadPtrOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+
+    // auto attr = LLVM::DereferenceableAttr::get(getContext(), 8, false);
+    auto ptr = LLVM::IntToPtrOp::create(
+        rewriter, op.getLoc(), LLVM::LLVMPointerType::get(getContext()),
+        op.getSource());
+    auto load = LLVM::LoadOp::create(rewriter, op.getLoc(), op.getType(),
+                                     ptr);
+    rewriter.replaceOp(op, load);
+    return success();
+  }
+};
+
 struct ConvertCudaTileCPUToLLVM
     : public mlir::cuda_tile::cpu::impl::ConvertCudaTileCPUToLLVMBase<
           ConvertCudaTileCPUToLLVM> {
@@ -141,7 +162,7 @@ struct ConvertCudaTileCPUToLLVM
     LLVMTypeConverter typeConverter(context);
 
     RewritePatternSet patterns(context);
-    patterns.add<PrintPattern>(typeConverter, context);
+    patterns.add<PrintPattern, LoadPtrPattern>(typeConverter, context);
 
     target.addIllegalDialect<cpu::CudaTileCPUDialect>();
     target.addLegalDialect<LLVM::LLVMDialect>();

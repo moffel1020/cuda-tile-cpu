@@ -2,6 +2,7 @@
 #include "cuda_tile_cpu/Conversion/CudaTileToStandard/Passes.h"
 #include "cuda_tile_cpu/Dialect/CudaTileCPU/IR/Dialect.h"
 #include "cuda_tile_cpu/Dialect/CudaTileCPU/IR/Types.h"
+#include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -33,6 +34,49 @@ namespace {
 
 using namespace mlir;
 using namespace mlir::cuda_tile;
+using namespace llvm;
+
+struct LoadPtrTilePattern : public OpConversionPattern<cpu::LoadPtrTileOp> {
+  using OpConversionPattern<cpu::LoadPtrTileOp>::OpConversionPattern;
+  LogicalResult
+  matchAndRewrite(cpu::LoadPtrTileOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+
+    auto ty = op.getType();
+    auto memTy = MemRefType::get(ty.getShape(), ty.getElementType());
+    auto values = memref::AllocOp::create(rewriter, op.getLoc(), memTy);
+
+    auto elemTy = cast<ShapedType>(op.getResult().getType()).getElementType();
+
+    if (ty.getRank() == 0) {
+      auto ptr =
+          tensor::ExtractOp::create(rewriter, op.getLoc(), op.getSource(), {});
+      auto val = cpu::LoadPtrOp::create(rewriter, op.getLoc(), elemTy, ptr);
+      memref::StoreOp::create(rewriter, op.getLoc(), val, values);
+      auto buffer = bufferization::ToTensorOp::create(rewriter, op.getLoc(), ty,
+                                                      values, true);
+      rewriter.replaceOp(op, buffer);
+      return success();
+    } else if (ty.getRank() != 1) { // TODO: fix
+      return failure();
+    }
+
+    auto loop = affine::AffineForOp::create(
+        rewriter, op.getLoc(), 0, ty.getShape()[0], 1, {},
+        [&](OpBuilder &b, Location loc, Value i, ValueRange) {
+          auto ptr =
+              tensor::ExtractOp::create(b, op.getLoc(), op.getSource(), {i});
+          auto val = cpu::LoadPtrOp::create(b, op.getLoc(), elemTy, ptr);
+          affine::AffineStoreOp::create(b, loc, val, values, {i});
+          affine::AffineYieldOp::create(b, loc);
+        });
+
+    auto buffer = bufferization::ToTensorOp::create(rewriter, op.getLoc(), ty,
+                                                    values, true);
+    rewriter.replaceOp(op, buffer);
+    return success();
+  }
+};
 
 struct LowerCudaTileCPUMemOps
     : public mlir::cuda_tile::cpu::impl::LowerCudaTileCPUMemOpsBase<
@@ -42,13 +86,25 @@ struct LowerCudaTileCPUMemOps
   LowerCudaTileCPUMemOps() : LowerCudaTileCPUMemOpsBase() {}
 
   void runOnOperation() override {
-    MLIRContext* context = &getContext();
+    MLIRContext *context = &getContext();
     mlir::ModuleOp mod = getOperation();
 
     ConversionTarget target(*context);
     RewritePatternSet patterns(context);
+    patterns.add<LoadPtrTilePattern>(context);
 
-    target.addIllegalOp<cpu::LoadPtrOp>();
+    target.addIllegalOp<cpu::LoadPtrTileOp>();
+    target.addLegalOp<cpu::LoadPtrOp>();
+    target.addLegalDialect<
+        arith::ArithDialect, affine::AffineDialect, func::FuncDialect,
+        memref::MemRefDialect, bufferization::BufferizationDialect,
+        linalg::LinalgDialect, tensor::TensorDialect, math::MathDialect,
+        scf::SCFDialect, cuda_tile::cpu::CudaTileCPUDialect>();
+
+    if (failed(applyPartialConversion(mod, target, std::move(patterns)))) {
+      signalPassFailure();
+      return;
+    }
   }
 };
 
