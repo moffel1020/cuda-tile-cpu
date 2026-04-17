@@ -147,7 +147,6 @@ struct LoadPtrPattern : public OpConversionPattern<cpu::LoadPtrOp> {
 
 struct StorePtrPattern : public OpConversionPattern<cpu::StorePtrOp> {
   using OpConversionPattern<cpu::StorePtrOp>::OpConversionPattern;
-
   LogicalResult
   matchAndRewrite(cpu::StorePtrOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
@@ -157,6 +156,24 @@ struct StorePtrPattern : public OpConversionPattern<cpu::StorePtrOp> {
     auto store =
         LLVM::StoreOp::create(rewriter, op.getLoc(), op.getValue(), ptr);
     rewriter.replaceOp(op, store);
+    return success();
+  }
+};
+
+struct MakeMemRefPattern : public OpConversionPattern<cpu::MakeMemRefOp> {
+  using OpConversionPattern<cpu::MakeMemRefOp>::OpConversionPattern;
+  LogicalResult
+  matchAndRewrite(cpu::MakeMemRefOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto memTy = getTypeConverter()->convertType(
+        op.getType()); // convert memref to llvm ir struct
+    auto memOp = LLVM::UndefOp::create(rewriter, op.getLoc(), memTy);
+    auto ptr = LLVM::IntToPtrOp::create(
+        rewriter, op.getLoc(), LLVM::LLVMPointerType::get(getContext()),
+        op.getPtr());
+    auto newOp = LLVM::InsertValueOp::create(rewriter, op.getLoc(), memTy,
+                                             memOp, ptr, 1);
+    rewriter.replaceOp(op, newOp);
     return success();
   }
 };
@@ -177,7 +194,9 @@ struct ConvertCudaTileCPUToLLVM
     LLVMTypeConverter typeConverter(context);
 
     RewritePatternSet patterns(context);
-    patterns.add<PrintPattern, LoadPtrPattern, StorePtrPattern>(typeConverter, context);
+    patterns
+        .add<PrintPattern, LoadPtrPattern, StorePtrPattern, MakeMemRefPattern>(
+            typeConverter, context);
 
     target.addIllegalDialect<cpu::CudaTileCPUDialect>();
     target.addLegalDialect<LLVM::LLVMDialect>();

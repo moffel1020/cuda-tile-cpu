@@ -43,16 +43,26 @@ public:
     addConversion([&](cuda_tile::TileType type) -> Type {
       return convertTileToTensor(type);
     });
+
+    addConversion([&](cuda_tile::TensorViewType type) -> Type {
+      return convertTensorViewToMemRef(type);
+    });
   }
 
 private:
   Type convertTileToTensor(cuda_tile::TileType type) const {
     auto shape = type.getShape();
-    Type elementType = type.getElementType();
-    if (auto ptrType = dyn_cast<cuda_tile::PointerType>(elementType)) {
-      elementType = convertCudaTilePtr(ptrType);
+    Type elemTy = type.getElementType();
+    if (auto ptrType = dyn_cast<cuda_tile::PointerType>(elemTy)) {
+      elemTy = convertCudaTilePtr(ptrType);
     }
-    return RankedTensorType::get(shape, elementType);
+    return RankedTensorType::get(shape, elemTy);
+  }
+
+  Type convertTensorViewToMemRef(cuda_tile::TensorViewType type) const {
+    auto shape = type.getShape();
+    Type elemTy = type.getElementType();
+    return MemRefType::get(shape, elemTy);
   }
 
   Type convertCudaTilePtr(cuda_tile::PointerType ptrType) const {
@@ -1203,6 +1213,91 @@ struct StorePtrTkoPattern
   }
 };
 
+struct MakeTensorViewPattern
+    : public OpConversionPattern<cuda_tile::MakeTensorViewOp> {
+  using OpConversionPattern<cuda_tile::MakeTensorViewOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(cuda_tile::MakeTensorViewOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto ptr =
+        tensor::ExtractOp::create(rewriter, op.getLoc(), adaptor.getBase(), {});
+    auto ty = op.getType();
+    auto memTy = MemRefType::get(ty.getShape(), ty.getElementType());
+    // TODO: sizes/strides, possibly dynamic
+    auto newOp = cpu::MakeMemRefOp::create(rewriter, op.getLoc(), memTy, ptr);
+    rewriter.replaceOp(op, newOp);
+    return success();
+  }
+};
+
+struct MakePartitionViewPattern
+    : public OpConversionPattern<cuda_tile::MakePartitionViewOp> {
+  using OpConversionPattern<
+      cuda_tile::MakePartitionViewOp>::OpConversionPattern;
+  LogicalResult
+  matchAndRewrite(cuda_tile::MakePartitionViewOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    rewriter.replaceOp(op, op.getTensorView()); // TODO: idk if this is ok. maybe DCE should just handle it?
+    return success();
+  }
+};
+
+struct LoadViewTkoPattern
+    : public OpConversionPattern<cuda_tile::LoadViewTkoOp> {
+  using OpConversionPattern<cuda_tile::LoadViewTkoOp>::OpConversionPattern;
+  LogicalResult
+  matchAndRewrite(cuda_tile::LoadViewTkoOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto view = op.getView();
+    auto partitionViewOp = view.getDefiningOp<cuda_tile::MakePartitionViewOp>();
+    if (!partitionViewOp) {
+      return rewriter.notifyMatchFailure(
+          op, "expected make_partition_view as view producer");
+    }
+
+    auto tensorView = partitionViewOp.getTensorView();
+    Value baseMemRef = rewriter.getRemappedValue(tensorView);
+    llvm::errs() << baseMemRef << "\n";
+    if (!baseMemRef) {
+      return failure();
+    }
+
+    auto partitionView = cast<PartitionViewType>(view.getType());
+    auto tileShape = partitionView.getTileShape();
+    SmallVector<Value> indices =
+        llvm::map_to_vector(adaptor.getIndex(), [&](auto val) {
+          auto idx = tensor::ExtractOp::create(rewriter, op.getLoc(), val, {});
+          return static_cast<Value>(arith::IndexCastOp::create(
+              rewriter, op.getLoc(), rewriter.getIndexType(), idx));
+        });
+
+    // TODO: handle static offsets/sizes/strides properly, currently everything is dynamic i think
+    SmallVector<OpFoldResult> offsets, sizes, strides;
+    for (auto [idx, tileSize] : llvm::zip(indices, tileShape.asArrayRef())) {
+      Value tileSizeVal =
+          arith::ConstantIndexOp::create(rewriter, op.getLoc(), tileSize);
+      offsets.emplace_back(
+          arith::MulIOp::create(rewriter, op.getLoc(), idx, tileSizeVal));
+      sizes.emplace_back(rewriter.getIndexAttr(tileSize));
+      strides.emplace_back(rewriter.getIndexAttr(1));
+    }
+
+    auto subview = memref::SubViewOp::create(rewriter, op.getLoc(), baseMemRef,
+                                             offsets, sizes, strides);
+
+    auto svTy = subview.getResult().getType();
+    auto memTy = cast<BaseMemRefType>(baseMemRef.getType());
+    auto tensorTy =
+        RankedTensorType::get(svTy.getShape(), svTy.getElementType());
+    auto tensor = bufferization::ToTensorOp::create(rewriter, op.getLoc(),
+                                                    tensorTy, subview, true);
+
+    rewriter.replaceOp(op, tensor);
+    return success();
+  }
+};
+
 struct MoveOutOfCudaTileModule
     : public OpConversionPattern<cuda_tile::ModuleOp> {
   using OpConversionPattern<cuda_tile::ModuleOp>::OpConversionPattern;
@@ -1242,22 +1337,22 @@ struct ConvertCudaTileToStandard
     CudaTileTypeConverter typeConverter;
 
     RewritePatternSet patterns(context);
-    patterns
-        .add<EntryPattern, ReturnPattern, ConstantPattern, IotaPattern,
-             ReshapePattern, BroadcastPattern, OffsetPattern, CatPattern,
-             ExtractPattern, PermutePattern, AddIPattern, SubIPattern,
-             CmpIPattern, ShLIPattern, ShRIPattern, MulIPattern, DivIPattern,
-             NegIPattern, MulHiIPattern, OrIPattern, XOrIPattern, AndIPattern,
-             MaxIPattern, MinIPattern, RemIPattern, AbsIPattern, FloorPattern,
-             CeilPattern, AbsFPattern, Atan2Pattern, CoshPattern, CosPattern,
-             ExpPattern, Log2Pattern, NegFPattern, SinhPattern, SinPattern,
-             TanPattern, PowPattern, AddFPattern, DivFPattern, Exp2Pattern,
-             FmaPattern, MaxFPattern, MinFPattern, RsqrtPattern, SqrtPattern,
-             SqrtPattern, TanHPattern, RemFPattern, MmaFPattern, BitcastPattern,
-             ExtiPattern, FToIPattern, FToFPattern, IToFPattern, TruncIPattern,
-             MmaIPattern, YieldPattern, IfPattern, PrintTkoPattern,
-             LoadPtrTkoPattern, StorePtrTkoPattern, MoveOutOfCudaTileModule>(
-            typeConverter, context);
+    patterns.add<
+        EntryPattern, ReturnPattern, ConstantPattern, IotaPattern,
+        ReshapePattern, BroadcastPattern, OffsetPattern, CatPattern,
+        ExtractPattern, PermutePattern, AddIPattern, SubIPattern, CmpIPattern,
+        ShLIPattern, ShRIPattern, MulIPattern, DivIPattern, NegIPattern,
+        MulHiIPattern, OrIPattern, XOrIPattern, AndIPattern, MaxIPattern,
+        MinIPattern, RemIPattern, AbsIPattern, FloorPattern, CeilPattern,
+        AbsFPattern, Atan2Pattern, CoshPattern, CosPattern, ExpPattern,
+        Log2Pattern, NegFPattern, SinhPattern, SinPattern, TanPattern,
+        PowPattern, AddFPattern, DivFPattern, Exp2Pattern, FmaPattern,
+        MaxFPattern, MinFPattern, RsqrtPattern, SqrtPattern, SqrtPattern,
+        TanHPattern, RemFPattern, MmaFPattern, BitcastPattern, ExtiPattern,
+        FToIPattern, FToFPattern, IToFPattern, TruncIPattern, MmaIPattern,
+        YieldPattern, IfPattern, PrintTkoPattern, LoadPtrTkoPattern,
+        StorePtrTkoPattern, MakeTensorViewPattern, MakePartitionViewPattern,
+        LoadViewTkoPattern, MoveOutOfCudaTileModule>(typeConverter, context);
 
     target.addIllegalDialect<CudaTileDialect>();
     target.addLegalDialect<

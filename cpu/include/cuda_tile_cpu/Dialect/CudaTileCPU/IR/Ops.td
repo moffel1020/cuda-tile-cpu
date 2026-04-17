@@ -21,6 +21,15 @@ def CudaTileCPU_PrintOp : CudaTileCPU_Op<"print"> {
   }];
 }
 
+def CudaTileCPU_MakeMemRefOp : CudaTileCPU_Op<"make_memref"> {
+  let summary = "Make a memref from a pointer";
+
+  let arguments = (ins I64:$ptr);
+  let results = (outs AnyRankedOrUnrankedMemRef:$result); // TODO: dynamic shape/strides
+
+  let assemblyFormat = "$ptr attr-dict `:` type($ptr) `->` type($result)";
+}
+
 def CudaTileCPU_LoadPtrTileOp : CudaTileCPU_Op<"load_ptr_tile"> {
   let summary = "load a tensor from a tensor of pointers";
 
