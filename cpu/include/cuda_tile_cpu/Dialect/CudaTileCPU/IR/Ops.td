@@ -39,4 +39,20 @@ def CudaTileCPU_LoadPtrOp : CudaTileCPU_Op<"load_ptr"> {
   let assemblyFormat = "$source attr-dict `:` qualified(type($source)) `->` type($result)";
 }
 
+def CudaTileCPU_StorePtrTileOp : CudaTileCPU_Op<"store_ptr_tile"> {
+  let summary = "store tensor to the addresses of a tensor of  pointers";
+
+  let arguments = (ins RankedTensorOf<[I64]>:$destination, AnyRankedTensor:$value); // TODO mask
+
+  let assemblyFormat = "$destination `,` $value attr-dict `:` type($destination) `,` type($value)";
+}
+
+def CudaTileCPU_StorePtrOp : CudaTileCPU_Op<"store_ptr"> {
+  let summary = "store a scalar to an address specified by the pointer";
+
+  let arguments = (ins I64:$destination, CudaTile_NumberType:$value);
+
+  let assemblyFormat = "$destination `,` $value attr-dict `:` type($destination) `,` type($value)";
+}
+
 #endif

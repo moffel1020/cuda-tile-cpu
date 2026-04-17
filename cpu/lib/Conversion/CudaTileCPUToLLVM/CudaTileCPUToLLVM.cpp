@@ -139,9 +139,24 @@ struct LoadPtrPattern : public OpConversionPattern<cpu::LoadPtrOp> {
     auto ptr = LLVM::IntToPtrOp::create(
         rewriter, op.getLoc(), LLVM::LLVMPointerType::get(getContext()),
         op.getSource());
-    auto load = LLVM::LoadOp::create(rewriter, op.getLoc(), op.getType(),
-                                     ptr);
+    auto load = LLVM::LoadOp::create(rewriter, op.getLoc(), op.getType(), ptr);
     rewriter.replaceOp(op, load);
+    return success();
+  }
+};
+
+struct StorePtrPattern : public OpConversionPattern<cpu::StorePtrOp> {
+  using OpConversionPattern<cpu::StorePtrOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(cpu::StorePtrOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto ptr = LLVM::IntToPtrOp::create(
+        rewriter, op.getLoc(), LLVM::LLVMPointerType::get(getContext()),
+        op.getDestination());
+    auto store =
+        LLVM::StoreOp::create(rewriter, op.getLoc(), op.getValue(), ptr);
+    rewriter.replaceOp(op, store);
     return success();
   }
 };
@@ -162,7 +177,7 @@ struct ConvertCudaTileCPUToLLVM
     LLVMTypeConverter typeConverter(context);
 
     RewritePatternSet patterns(context);
-    patterns.add<PrintPattern, LoadPtrPattern>(typeConverter, context);
+    patterns.add<PrintPattern, LoadPtrPattern, StorePtrPattern>(typeConverter, context);
 
     target.addIllegalDialect<cpu::CudaTileCPUDialect>();
     target.addLegalDialect<LLVM::LLVMDialect>();

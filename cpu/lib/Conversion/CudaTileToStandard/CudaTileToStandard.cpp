@@ -1183,19 +1183,22 @@ struct LoadPtrTkoPattern : public OpConversionPattern<cuda_tile::LoadPtrTkoOp> {
   LogicalResult
   matchAndRewrite(cuda_tile::LoadPtrTkoOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-
     auto ptrTy = getTypeConverter()->convertType(op.getResult());
-    if (dyn_cast<RankedTensorType>(ptrTy)) {
-      auto loadOp = cpu::LoadPtrTileOp::create(rewriter, op.getLoc(), ptrTy,
-                                               adaptor.getSource());
-      rewriter.replaceOp(op, loadOp);
-    } else {
-      auto elemTy = cast<TileType>(op.getResult().getType()).getElementType();
-      auto loadOp = cpu::LoadPtrOp::create(rewriter, op.getLoc(), elemTy,
-                                           adaptor.getSource());
-      rewriter.replaceOp(op, loadOp);
-    }
+    auto loadOp = rewriter.replaceOpWithNewOp<cpu::LoadPtrTileOp>(
+        op, ptrTy, adaptor.getSource());
+    return success();
+  }
+};
 
+struct StorePtrTkoPattern
+    : public OpConversionPattern<cuda_tile::StorePtrTkoOp> {
+  using OpConversionPattern<cuda_tile::StorePtrTkoOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(cuda_tile::StorePtrTkoOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    rewriter.replaceOpWithNewOp<cpu::StorePtrTileOp>(
+        op, adaptor.getDestination(), adaptor.getValue());
     return success();
   }
 };
@@ -1253,15 +1256,15 @@ struct ConvertCudaTileToStandard
              SqrtPattern, TanHPattern, RemFPattern, MmaFPattern, BitcastPattern,
              ExtiPattern, FToIPattern, FToFPattern, IToFPattern, TruncIPattern,
              MmaIPattern, YieldPattern, IfPattern, PrintTkoPattern,
-             LoadPtrTkoPattern, MoveOutOfCudaTileModule>(typeConverter,
-                                                         context);
+             LoadPtrTkoPattern, StorePtrTkoPattern, MoveOutOfCudaTileModule>(
+            typeConverter, context);
 
     target.addIllegalDialect<CudaTileDialect>();
     target.addLegalDialect<
         arith::ArithDialect, func::FuncDialect, memref::MemRefDialect,
         bufferization::BufferizationDialect, linalg::LinalgDialect,
         tensor::TensorDialect, math::MathDialect, scf::SCFDialect,
-        cuda_tile::cpu::CudaTileCPUDialect>();
+        cpu::CudaTileCPUDialect>();
 
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(
         patterns, typeConverter);

@@ -57,14 +57,16 @@ struct LoadPtrTilePattern : public OpConversionPattern<cpu::LoadPtrTileOp> {
                                                       values, true);
       rewriter.replaceOp(op, buffer);
       return success();
-    } else if (ty.getRank() != 1) { // TODO: fix
+    }
+
+    if (ty.getRank() != 1) { // TODO: fix
       return failure();
     }
 
     // TODO: handle from/to tensor implicitly with target/source materialization
     // in the typeconverter
     auto sourceTy = op.getSource().getType();
-    auto loadMemref = bufferization::ToBufferOp::create(
+    auto srcMemref = bufferization::ToBufferOp::create(
         rewriter, op.getLoc(),
         MemRefType::get(sourceTy.getShape(), sourceTy.getElementType()),
         op.getSource(), true);
@@ -72,15 +74,53 @@ struct LoadPtrTilePattern : public OpConversionPattern<cpu::LoadPtrTileOp> {
     auto loop = affine::AffineForOp::create(
         rewriter, op.getLoc(), 0, ty.getShape()[0], 1, {},
         [&](OpBuilder &b, Location loc, Value i, ValueRange) {
-          auto ptr = affine::AffineLoadOp::create(b, loc, loadMemref, {i});
+          auto ptr = affine::AffineLoadOp::create(b, loc, srcMemref, i);
           auto val = cpu::LoadPtrOp::create(b, op.getLoc(), elemTy, ptr);
-          affine::AffineStoreOp::create(b, loc, val, values, {i});
+          affine::AffineStoreOp::create(b, loc, val, values, i);
           affine::AffineYieldOp::create(b, loc);
         });
 
-    auto buffer = bufferization::ToTensorOp::create(rewriter, op.getLoc(), ty,
+    auto tensor = bufferization::ToTensorOp::create(rewriter, op.getLoc(), ty,
                                                     values, true);
-    rewriter.replaceOp(op, buffer);
+    rewriter.replaceOp(op, tensor);
+    return success();
+  }
+};
+
+struct StorePtrTilePattern : OpConversionPattern<cpu::StorePtrTileOp> {
+  using OpConversionPattern<cpu::StorePtrTileOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(cpu::StorePtrTileOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+
+    auto ty = op.getValue().getType();
+    if (ty.getRank() != 1) {
+      return failure(); // TODO
+    }
+
+    auto destTy = op.getDestination().getType();
+    auto destMemref = bufferization::ToBufferOp::create(
+        rewriter, op.getLoc(),
+        MemRefType::get(destTy.getShape(), destTy.getElementType()),
+        op.getDestination(), true);
+
+    auto valTy = op.getValue().getType();
+    auto valMemref = bufferization::ToBufferOp::create(
+        rewriter, op.getLoc(),
+        MemRefType::get(valTy.getShape(), valTy.getElementType()),
+        op.getValue(), true);
+
+    auto loop = affine::AffineForOp::create(
+        rewriter, op.getLoc(), 0, ty.getShape()[0], 1, {},
+        [&](OpBuilder &b, Location loc, Value i, ValueRange) {
+          auto ptr = affine::AffineLoadOp::create(b, loc, destMemref, i);
+          auto val = affine::AffineLoadOp::create(b, loc, valMemref, i);
+          cpu::StorePtrOp::create(b, loc, ptr, val);
+          affine::AffineYieldOp::create(b, loc);
+        });
+
+    rewriter.replaceOp(op, loop);
     return success();
   }
 };
@@ -98,10 +138,9 @@ struct LowerCudaTileCPUMemOps
 
     ConversionTarget target(*context);
     RewritePatternSet patterns(context);
-    patterns.add<LoadPtrTilePattern>(context);
+    patterns.add<LoadPtrTilePattern, StorePtrTilePattern>(context);
 
-    target.addIllegalOp<cpu::LoadPtrTileOp>();
-    target.addLegalOp<cpu::LoadPtrOp>();
+    target.addIllegalOp<cpu::LoadPtrTileOp, cpu::StorePtrTileOp>();
     target.addLegalDialect<
         arith::ArithDialect, affine::AffineDialect, func::FuncDialect,
         memref::MemRefDialect, bufferization::BufferizationDialect,
