@@ -162,23 +162,63 @@ struct IotaPattern : public OpConversionPattern<cuda_tile::IotaOp> {
   LogicalResult
   matchAndRewrite(cuda_tile::IotaOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+    auto opTy = op.getResult().getType();
+    auto shape = opTy.getShape();
+    if (opTy.getRank() != 1) {
+      return rewriter.notifyMatchFailure(op, "1d shape expected for iota op");
+    }
 
-    // auto opType = op.getResult().getType();
-    // auto shape = opType.getShape();
-    // if (shape.size() != 1) {
-    //   return rewriter.notifyMatchFailure(op, "1d shape expected for iota
-    //   op");
-    // }
+    auto width = opTy.getElementType().getIntOrFloatBitWidth();
+    SmallVector<APInt> indices(opTy.getNumElements());
+    std::iota(indices.begin(), indices.end(), APInt(width, 0));
 
-    // auto width = opType.getElementType().getIntOrFloatBitWidth();
-    // SmallVector<APInt> indices(opType.getNumElements());
-    // std::iota(indices.begin(), indices.end(), APInt(width, 0));
+    // TODO: could linalg generic be better here?
+    auto ty = RankedTensorType::get(shape, opTy.getElementType());
+    rewriter.replaceOpWithNewOp<arith::ConstantOp>(
+        op, DenseElementsAttr::get(ty, indices));
 
-    // auto vecType = VectorType::get(shape, opType.getElementType());
-    // rewriter.replaceOpWithNewOp<arith::ConstantOp>(
-    //     op, DenseElementsAttr::get(vecType, indices));
+    return success();
+  }
+};
 
-    return failure();
+struct OffsetPattern : public OpConversionPattern<cuda_tile::OffsetOp> {
+  using OpConversionPattern<cuda_tile::OffsetOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(cuda_tile::OffsetOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto ptrTy = op.getPtr().getType().getElementType();
+    auto pointeeTy = cast<PointerType>(ptrTy).getPointeeType();
+    auto bitWidth = pointeeTy.getIntOrFloatBitWidth();
+    // the spec says just multiply by bitwidth here but that seems wrong
+    auto offWidth = op.getOffset().getType().getElementTypeBitWidth();
+    auto widthConst =
+        arith::ConstantIntOp::create(rewriter, op.getLoc(), bitWidth / 8, 64);
+
+    auto opTy = op.getType();
+    auto empty = tensor::EmptyOp::create(rewriter, op.getLoc(), opTy.getShape(),
+                                         rewriter.getI64Type());
+
+    auto flags =
+        arith::IntegerOverflowFlags::nsw | arith::IntegerOverflowFlags::nuw;
+
+    auto newOp = linalg::MapOp::create(
+        rewriter, op.getLoc(), {adaptor.getPtr(), adaptor.getOffset()}, empty,
+        [&](OpBuilder &b, Location loc, ValueRange args) {
+          auto ptrElem = args[0];
+          auto offElem = args[1];
+          if (offWidth != 64) {
+            offElem = arith::ExtUIOp::create(b, loc, rewriter.getI64Type(),
+                                             offElem, true);
+          }
+          auto mulOp =
+              arith::MulIOp::create(b, loc, offElem, widthConst, flags);
+          Value addOp = arith::AddIOp::create(b, loc, ptrElem, mulOp, flags);
+          linalg::YieldOp::create(b, loc, addOp);
+        });
+
+    rewriter.replaceOp(op, newOp);
+    return success();
   }
 };
 
@@ -1201,19 +1241,20 @@ struct ConvertCudaTileToStandard
     RewritePatternSet patterns(context);
     patterns
         .add<EntryPattern, ReturnPattern, ConstantPattern, IotaPattern,
-             ReshapePattern, BroadcastPattern, CatPattern, ExtractPattern,
-             PermutePattern, AddIPattern, SubIPattern, CmpIPattern, ShLIPattern,
-             ShRIPattern, MulIPattern, DivIPattern, NegIPattern, MulHiIPattern,
-             OrIPattern, XOrIPattern, AndIPattern, MaxIPattern, MinIPattern,
-             RemIPattern, AbsIPattern, FloorPattern, CeilPattern, AbsFPattern,
-             Atan2Pattern, CoshPattern, CosPattern, ExpPattern, Log2Pattern,
-             NegFPattern, SinhPattern, SinPattern, TanPattern, PowPattern,
-             AddFPattern, DivFPattern, Exp2Pattern, FmaPattern, MaxFPattern,
-             MinFPattern, RsqrtPattern, SqrtPattern, SqrtPattern, TanHPattern,
-             RemFPattern, MmaFPattern, BitcastPattern, ExtiPattern, FToIPattern,
-             FToFPattern, IToFPattern, TruncIPattern, MmaIPattern, YieldPattern,
-             IfPattern, PrintTkoPattern, LoadPtrTkoPattern,
-             MoveOutOfCudaTileModule>(typeConverter, context);
+             ReshapePattern, BroadcastPattern, OffsetPattern, CatPattern,
+             ExtractPattern, PermutePattern, AddIPattern, SubIPattern,
+             CmpIPattern, ShLIPattern, ShRIPattern, MulIPattern, DivIPattern,
+             NegIPattern, MulHiIPattern, OrIPattern, XOrIPattern, AndIPattern,
+             MaxIPattern, MinIPattern, RemIPattern, AbsIPattern, FloorPattern,
+             CeilPattern, AbsFPattern, Atan2Pattern, CoshPattern, CosPattern,
+             ExpPattern, Log2Pattern, NegFPattern, SinhPattern, SinPattern,
+             TanPattern, PowPattern, AddFPattern, DivFPattern, Exp2Pattern,
+             FmaPattern, MaxFPattern, MinFPattern, RsqrtPattern, SqrtPattern,
+             SqrtPattern, TanHPattern, RemFPattern, MmaFPattern, BitcastPattern,
+             ExtiPattern, FToIPattern, FToFPattern, IToFPattern, TruncIPattern,
+             MmaIPattern, YieldPattern, IfPattern, PrintTkoPattern,
+             LoadPtrTkoPattern, MoveOutOfCudaTileModule>(typeConverter,
+                                                         context);
 
     target.addIllegalDialect<CudaTileDialect>();
     target.addLegalDialect<

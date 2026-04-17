@@ -61,11 +61,18 @@ struct LoadPtrTilePattern : public OpConversionPattern<cpu::LoadPtrTileOp> {
       return failure();
     }
 
+    // TODO: handle from/to tensor implicitly with target/source materialization
+    // in the typeconverter
+    auto sourceTy = op.getSource().getType();
+    auto loadMemref = bufferization::ToBufferOp::create(
+        rewriter, op.getLoc(),
+        MemRefType::get(sourceTy.getShape(), sourceTy.getElementType()),
+        op.getSource(), true);
+
     auto loop = affine::AffineForOp::create(
         rewriter, op.getLoc(), 0, ty.getShape()[0], 1, {},
         [&](OpBuilder &b, Location loc, Value i, ValueRange) {
-          auto ptr =
-              tensor::ExtractOp::create(b, op.getLoc(), op.getSource(), {i});
+          auto ptr = affine::AffineLoadOp::create(b, loc, loadMemref, {i});
           auto val = cpu::LoadPtrOp::create(b, op.getLoc(), elemTy, ptr);
           affine::AffineStoreOp::create(b, loc, val, values, {i});
           affine::AffineYieldOp::create(b, loc);
