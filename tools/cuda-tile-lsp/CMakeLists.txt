@@ -6,15 +6,12 @@ target_link_libraries(cuda-tile-lsp PRIVATE
   CudaTileDialect
   CudaTileCPUDialect
   CudaTileToStandard
-  MLIRTensorDialect
-  MLIRLinalgDialect
-  MLIRSCFDialect
-  MLIRFuncDialect
-  MLIRArithDialect
-  MLIRMathDialect
+
   MLIRLspServerLib
-  MLIRPass
-  MLIRTransforms
+
+  MLIRRegisterAllDialects
+  MLIRRegisterAllExtensions
+  MLIRRegisterAllPasses
 )
 
 mlir_check_all_link_libraries(cuda-tile-lsp)

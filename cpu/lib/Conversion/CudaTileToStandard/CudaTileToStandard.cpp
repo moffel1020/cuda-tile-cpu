@@ -173,20 +173,30 @@ struct IotaPattern : public OpConversionPattern<cuda_tile::IotaOp> {
   matchAndRewrite(cuda_tile::IotaOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     auto opTy = op.getResult().getType();
-    auto shape = opTy.getShape();
     if (opTy.getRank() != 1) {
       return rewriter.notifyMatchFailure(op, "1d shape expected for iota op");
     }
 
-    auto width = opTy.getElementType().getIntOrFloatBitWidth();
-    SmallVector<APInt> indices(opTy.getNumElements());
-    std::iota(indices.begin(), indices.end(), APInt(width, 0));
+    auto empty = tensor::EmptyOp::create(rewriter, op.getLoc(), opTy.getShape(),
+                                         opTy.getElementType());
 
-    // TODO: could linalg generic be better here?
-    auto ty = RankedTensorType::get(shape, opTy.getElementType());
-    rewriter.replaceOpWithNewOp<arith::ConstantOp>(
-        op, DenseElementsAttr::get(ty, indices));
+    AffineMap idMap = AffineMap::getMultiDimIdentityMap(1, getContext());
 
+    auto newOp = linalg::GenericOp::create(
+        rewriter, op.getLoc(),
+        /*resultTensorTypes=*/empty.getType(),
+        /*inputs=*/ValueRange{},
+        /*outputs=*/ValueRange{empty},
+        /*indexingMaps=*/ArrayRef<AffineMap>{idMap},
+        /*iteratorTypes=*/utils::IteratorType::parallel,
+        [&](OpBuilder &b, Location loc, ValueRange args) {
+          Value idx = linalg::IndexOp::create(b, loc, 0);
+          Value idxCasted =
+              arith::IndexCastOp::create(b, loc, opTy.getElementType(), idx);
+          linalg::YieldOp::create(b, loc, idxCasted);
+        });
+
+    rewriter.replaceOp(op, newOp);
     return success();
   }
 };
@@ -1238,7 +1248,9 @@ struct MakePartitionViewPattern
   LogicalResult
   matchAndRewrite(cuda_tile::MakePartitionViewOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    rewriter.replaceOp(op, op.getTensorView()); // TODO: idk if this is ok. maybe DCE should just handle it?
+    rewriter.replaceOp(op,
+                       op.getTensorView()); // TODO: idk if this is ok. maybe
+                                            // DCE should just handle it?
     return success();
   }
 };
@@ -1272,7 +1284,8 @@ struct LoadViewTkoPattern
               rewriter, op.getLoc(), rewriter.getIndexType(), idx));
         });
 
-    // TODO: handle static offsets/sizes/strides properly, currently everything is dynamic i think
+    // TODO: handle static offsets/sizes/strides properly, currently everything
+    // is dynamic i think
     SmallVector<OpFoldResult> offsets, sizes, strides;
     for (auto [idx, tileSize] : llvm::zip(indices, tileShape.asArrayRef())) {
       Value tileSizeVal =

@@ -18,6 +18,10 @@ set(LIBS
   CudaTileCPUDialect
   CudaTileToStandard
   CudaTileCPUToLLVM
+
+  MLIRRegisterAllDialects
+  MLIRRegisterAllExtensions
+  MLIRRegisterAllPasses
   )
 
 add_mlir_tool(cuda-tile-opt
