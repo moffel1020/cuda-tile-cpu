@@ -10,7 +10,7 @@
 #include "cuda_tile_cpu/Conversion/CudaTileCPUToLLVM/Passes.h"
 #include "cuda_tile_cpu/Conversion/CudaTileToStandard/Passes.h"
 #include "cuda_tile_cpu/Dialect/CudaTileCPU/IR/Dialect.h"
-#include "mlir/IR/Dialect.h"
+#include "cuda_tile_cpu/Dialect/CudaTileCPU/Transforms/TilingInterfaceImpl.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/InitAllDialects.h"
 #include "mlir/InitAllExtensions.h"
@@ -23,19 +23,19 @@ int main(int argc, char **argv) {
 
   registry.insert<mlir::cuda_tile::CudaTileDialect,
                   mlir::cuda_tile::cpu::CudaTileCPUDialect>();
+
+  mlir::cuda_tile::cpu::registerTilingInterfaceExternalModels(registry);
+
+  mlir::registerAllDialects(registry);
+  mlir::registerAllExtensions(registry);
+
   mlir::registerCanonicalizerPass();
   mlir::registerCSEPass();
   mlir::registerInlinerPass();
   mlir::cuda_tile::registerCudaTilePasses();
-
   mlir::cuda_tile::cpu::registerCudaTileToStandardPasses();
   mlir::cuda_tile::cpu::registerCudaTileCPUToLLVMPasses();
-
   mlir::registerAllPasses();
-  mlir::registerAllDialects(registry);
-  mlir::registerAllExtensions(registry);
-  registry.insert<mlir::cuda_tile::CudaTileDialect,
-                  mlir::cuda_tile::cpu::CudaTileCPUDialect>();
 
   return mlir::asMainReturnCode(
       mlir::MlirOptMain(argc, argv, "CudaTile test driver\n", registry));

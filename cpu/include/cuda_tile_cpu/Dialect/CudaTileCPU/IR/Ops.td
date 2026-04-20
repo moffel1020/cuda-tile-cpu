@@ -2,11 +2,13 @@
 #define CUDATILE_CPU_OPS_TD
 
 include "mlir/IR/OpBase.td"
+include "mlir/Interfaces/TilingInterface.td"
 
 include "cuda_tile_cpu/Dialect/CudaTileCPU/IR/Dialect.td"
 include "cuda_tile_cpu/Dialect/CudaTileCPU/IR/Types.td"
 
 include "cuda_tile/Dialect/CudaTile/IR/Types.td"
+
 
 class CudaTileCPU_Op<string mnemonic, list<Trait> traits = []> :
   Op<CudaTileCPU_Dialect, mnemonic, !listconcat(traits, [])> {}
