@@ -3,6 +3,7 @@
 
 include "mlir/IR/OpBase.td"
 include "mlir/Interfaces/TilingInterface.td"
+include "mlir/Interfaces/SideEffectInterfaces.td"
 
 include "cuda_tile_cpu/Dialect/CudaTileCPU/IR/Dialect.td"
 include "cuda_tile_cpu/Dialect/CudaTileCPU/IR/Types.td"
@@ -13,7 +14,7 @@ include "cuda_tile/Dialect/CudaTile/IR/Types.td"
 class CudaTileCPU_Op<string mnemonic, list<Trait> traits = []> :
   Op<CudaTileCPU_Dialect, mnemonic, !listconcat(traits, [])> {}
 
-def CudaTileCPU_PrintOp : CudaTileCPU_Op<"print"> {
+def CudaTileCPU_PrintOp : CudaTileCPU_Op<"print", [MemoryEffects<[MemRead, MemWrite]>]> {
   let summary = "Print a string with optional unranked memref at the end";
 
   let arguments = (ins StrAttr:$str, Optional<AnyUnrankedMemRef>:$value);
@@ -32,7 +33,7 @@ def CudaTileCPU_MakeMemRefOp : CudaTileCPU_Op<"make_memref"> {
   let assemblyFormat = "$ptr attr-dict `:` type($ptr) `->` type($result)";
 }
 
-def CudaTileCPU_LoadPtrTileOp : CudaTileCPU_Op<"load_ptr_tile"> {
+def CudaTileCPU_LoadPtrTileOp : CudaTileCPU_Op<"load_ptr_tile", [MemoryEffects<[MemRead]>]> {
   let summary = "load a tensor from a tensor of pointers";
 
   let arguments = (ins RankedTensorOf<[I64]>:$source); // TODO: mask, padding?
@@ -41,7 +42,7 @@ def CudaTileCPU_LoadPtrTileOp : CudaTileCPU_Op<"load_ptr_tile"> {
   let assemblyFormat = "$source attr-dict `:` type($source) `->` type($result)";
 }
 
-def CudaTileCPU_LoadPtrOp : CudaTileCPU_Op<"load_ptr"> {
+def CudaTileCPU_LoadPtrOp : CudaTileCPU_Op<"load_ptr", [MemoryEffects<[MemRead]>]> {
   let summary = "load a scalar from a pointer";
 
   let arguments = (ins I64:$source);
@@ -50,7 +51,7 @@ def CudaTileCPU_LoadPtrOp : CudaTileCPU_Op<"load_ptr"> {
   let assemblyFormat = "$source attr-dict `:` qualified(type($source)) `->` type($result)";
 }
 
-def CudaTileCPU_StorePtrTileOp : CudaTileCPU_Op<"store_ptr_tile"> {
+def CudaTileCPU_StorePtrTileOp : CudaTileCPU_Op<"store_ptr_tile", [MemoryEffects<[MemWrite]>]> {
   let summary = "store tensor to the addresses of a tensor of  pointers";
 
   let arguments = (ins RankedTensorOf<[I64]>:$destination, AnyRankedTensor:$value); // TODO mask
@@ -58,7 +59,7 @@ def CudaTileCPU_StorePtrTileOp : CudaTileCPU_Op<"store_ptr_tile"> {
   let assemblyFormat = "$destination `,` $value attr-dict `:` type($destination) `,` type($value)";
 }
 
-def CudaTileCPU_StorePtrOp : CudaTileCPU_Op<"store_ptr"> {
+def CudaTileCPU_StorePtrOp : CudaTileCPU_Op<"store_ptr", [MemoryEffects<[MemWrite]>]> {
   let summary = "store a scalar to an address specified by the pointer";
 
   let arguments = (ins I64:$destination, CudaTile_NumberType:$value);
