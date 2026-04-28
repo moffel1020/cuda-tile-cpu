@@ -1248,10 +1248,10 @@ struct MakePartitionViewPattern
   LogicalResult
   matchAndRewrite(cuda_tile::MakePartitionViewOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    rewriter.replaceOp(op,
-                       op.getTensorView()); // TODO: idk if this is ok. maybe
-                                            // DCE should just handle it?
-    return success();
+    // rewriter.replaceOp(op,
+    //                    op.getTensorView()); // TODO: idk if this is ok. maybe
+    //                                         // DCE should just handle it?
+    return failure();
   }
 };
 
@@ -1261,53 +1261,53 @@ struct LoadViewTkoPattern
   LogicalResult
   matchAndRewrite(cuda_tile::LoadViewTkoOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    auto view = op.getView();
-    auto partitionViewOp = view.getDefiningOp<cuda_tile::MakePartitionViewOp>();
-    if (!partitionViewOp) {
-      return rewriter.notifyMatchFailure(
-          op, "expected make_partition_view as view producer");
-    }
+  //   auto view = op.getView();
+  //   auto partitionViewOp = view.getDefiningOp<cuda_tile::MakePartitionViewOp>();
+  //   if (!partitionViewOp) {
+  //     return rewriter.notifyMatchFailure(
+  //         op, "expected make_partition_view as view producer");
+  //   }
 
-    auto tensorView = partitionViewOp.getTensorView();
-    Value baseMemRef = rewriter.getRemappedValue(tensorView);
-    llvm::errs() << baseMemRef << "\n";
-    if (!baseMemRef) {
-      return failure();
-    }
+  //   auto tensorView = partitionViewOp.getTensorView();
+  //   Value baseMemRef = rewriter.getRemappedValue(tensorView);
+  //   llvm::errs() << baseMemRef << "\n";
+  //   if (!baseMemRef) {
+  //     return failure();
+  //   }
 
-    auto partitionView = cast<PartitionViewType>(view.getType());
-    auto tileShape = partitionView.getTileShape();
-    SmallVector<Value> indices =
-        llvm::map_to_vector(adaptor.getIndex(), [&](auto val) {
-          auto idx = tensor::ExtractOp::create(rewriter, op.getLoc(), val, {});
-          return static_cast<Value>(arith::IndexCastOp::create(
-              rewriter, op.getLoc(), rewriter.getIndexType(), idx));
-        });
+  //   auto partitionView = cast<PartitionViewType>(view.getType());
+  //   auto tileShape = partitionView.getTileShape();
+  //   SmallVector<Value> indices =
+  //       llvm::map_to_vector(adaptor.getIndex(), [&](auto val) {
+  //         auto idx = tensor::ExtractOp::create(rewriter, op.getLoc(), val, {});
+  //         return static_cast<Value>(arith::IndexCastOp::create(
+  //             rewriter, op.getLoc(), rewriter.getIndexType(), idx));
+  //       });
 
-    // TODO: handle static offsets/sizes/strides properly, currently everything
-    // is dynamic i think
-    SmallVector<OpFoldResult> offsets, sizes, strides;
-    for (auto [idx, tileSize] : llvm::zip(indices, tileShape.asArrayRef())) {
-      Value tileSizeVal =
-          arith::ConstantIndexOp::create(rewriter, op.getLoc(), tileSize);
-      offsets.emplace_back(
-          arith::MulIOp::create(rewriter, op.getLoc(), idx, tileSizeVal));
-      sizes.emplace_back(rewriter.getIndexAttr(tileSize));
-      strides.emplace_back(rewriter.getIndexAttr(1));
-    }
+  //   // TODO: handle static offsets/sizes/strides properly, currently everything
+  //   // is dynamic i think
+  //   SmallVector<OpFoldResult> offsets, sizes, strides;
+  //   for (auto [idx, tileSize] : llvm::zip(indices, tileShape.asArrayRef())) {
+  //     Value tileSizeVal =
+  //         arith::ConstantIndexOp::create(rewriter, op.getLoc(), tileSize);
+  //     offsets.emplace_back(
+  //         arith::MulIOp::create(rewriter, op.getLoc(), idx, tileSizeVal));
+  //     sizes.emplace_back(rewriter.getIndexAttr(tileSize));
+  //     strides.emplace_back(rewriter.getIndexAttr(1));
+  //   }
 
-    auto subview = memref::SubViewOp::create(rewriter, op.getLoc(), baseMemRef,
-                                             offsets, sizes, strides);
+  //   auto subview = memref::SubViewOp::create(rewriter, op.getLoc(), baseMemRef,
+  //                                            offsets, sizes, strides);
 
-    auto svTy = subview.getResult().getType();
-    auto memTy = cast<BaseMemRefType>(baseMemRef.getType());
-    auto tensorTy =
-        RankedTensorType::get(svTy.getShape(), svTy.getElementType());
-    auto tensor = bufferization::ToTensorOp::create(rewriter, op.getLoc(),
-                                                    tensorTy, subview, true);
+  //   auto svTy = subview.getResult().getType();
+  //   auto memTy = cast<BaseMemRefType>(baseMemRef.getType());
+  //   auto tensorTy =
+  //       RankedTensorType::get(svTy.getShape(), svTy.getElementType());
+  //   auto tensor = bufferization::ToTensorOp::create(rewriter, op.getLoc(),
+  //                                                   tensorTy, subview, true);
 
-    rewriter.replaceOp(op, tensor);
-    return success();
+  //   rewriter.replaceOp(op, tensor);
+    return failure();
   }
 };
 

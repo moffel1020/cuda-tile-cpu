@@ -24,7 +24,7 @@ def CudaTileCPU_PrintOp : CudaTileCPU_Op<"print", [MemoryEffects<[MemRead, MemWr
   }];
 }
 
-def CudaTileCPU_MakeMemRefOp : CudaTileCPU_Op<"make_memref"> {
+def CudaTileCPU_MakeMemRefOp : CudaTileCPU_Op<"make_memref", [Pure]> {
   let summary = "Make a memref from a pointer";
 
   let arguments = (ins I64:$ptr);
