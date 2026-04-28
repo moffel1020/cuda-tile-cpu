@@ -1,7 +1,15 @@
-add_mlir_dialect_library(CudaTileCPUTilingInterface
+add_mlir_dialect_library(CudaTileCPUTransforms
+  InsertParallelLoops.cpp
   TilingInterfaceImpl.cpp
 
+  DEPENDS
+  CudaTileCPUTransformsIncGen
+
   LINK_LIBS PUBLIC
-  MLIRIR
   CudaTileCPUDialect
+  MLIRIR
+  MLIRTransforms
+
+  LINK_COMPONENTS
+  Support
 )

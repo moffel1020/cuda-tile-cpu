@@ -10,6 +10,7 @@
 #include "cuda_tile_cpu/Conversion/CudaTileCPUToLLVM/Passes.h"
 #include "cuda_tile_cpu/Conversion/CudaTileToStandard/Passes.h"
 #include "cuda_tile_cpu/Dialect/CudaTileCPU/IR/Dialect.h"
+#include "cuda_tile_cpu/Dialect/CudaTileCPU/Transforms/Passes.h"
 #include "cuda_tile_cpu/Dialect/CudaTileCPU/Transforms/TilingInterfaceImpl.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/InitAllDialects.h"
@@ -33,6 +34,7 @@ int main(int argc, char **argv) {
   mlir::registerCSEPass();
   mlir::registerInlinerPass();
   mlir::cuda_tile::registerCudaTilePasses();
+  mlir::cuda_tile::cpu::registerCudaTileCPUPasses();
   mlir::cuda_tile::cpu::registerCudaTileToStandardPasses();
   mlir::cuda_tile::cpu::registerCudaTileCPUToLLVMPasses();
   mlir::registerAllPasses();

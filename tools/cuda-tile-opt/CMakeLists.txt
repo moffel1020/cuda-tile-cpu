@@ -18,7 +18,7 @@ set(LIBS
   CudaTileCPUDialect
   CudaTileToStandard
   CudaTileCPUToLLVM
-  CudaTileCPUTilingInterface
+  CudaTileCPUTransforms
 
   MLIRRegisterAllDialects
   MLIRRegisterAllExtensions
