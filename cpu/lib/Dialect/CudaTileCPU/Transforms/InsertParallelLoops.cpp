@@ -140,15 +140,3 @@ struct InsertParallelLoopsPass
 };
 
 } // namespace
-
-namespace mlir {
-namespace cuda_tile {
-namespace cpu {
-
-std::unique_ptr<::mlir::Pass> createInsertParallelLoops() {
-  return std::make_unique<InsertParallelLoopsPass>();
-}
-
-} // namespace cpu
-} // namespace cuda_tile
-} // namespace mlir

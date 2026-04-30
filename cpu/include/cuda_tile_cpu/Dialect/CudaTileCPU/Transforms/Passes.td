@@ -14,4 +14,20 @@ def InsertParallelLoopsPass : Pass<
   ];
 }
 
+def TileAndFuseIntoStorePass : Pass<
+  "cuda-tile-cpu-tile-and-fuse-into-store", "::mlir::ModuleOp"
+> {
+  let summary = "Fuse tileable ops into the store_ptr_tile op";
+
+  let options = [
+    ListOption<"tileSizes", "tile-sizes", "int64_t",
+               "Tile sizes for store_ptr_tile iteration dimensions. If empty, "
+               "all dimensions use tile size 32.">
+  ];
+
+  let dependentDialects = [
+    "mlir::scf::SCFDialect",
+  ];
+}
+
 #endif
