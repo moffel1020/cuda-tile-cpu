@@ -142,7 +142,7 @@ struct LoadPtrTilePattern : public OpConversionPattern<cpu::LoadPtrTileOp> {
       return failure();
     }
 
-    // try to inline vector transfer read and write
+    // try to use vector transfer read and write values directly
     if (succeeded(rewriteWithInlineVectorTransfer(op, rewriter, ty))) {
       return success();
     }

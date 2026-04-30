@@ -81,6 +81,60 @@ struct LoadPtrTileOpTilingInterface
   }
 };
 
+struct StorePtrTileOpTilingInterface
+    : public TilingInterface::ExternalModel<StorePtrTileOpTilingInterface,
+                                            cpu::StorePtrTileOp> {
+  SmallVector<utils::IteratorType> getLoopIteratorTypes(Operation *op) const {
+    auto storeOp = cast<cpu::StorePtrTileOp>(op);
+    auto valueTy = storeOp.getValue().getType();
+    SmallVector<utils::IteratorType> iteratorTypes(
+        valueTy.getRank(), utils::IteratorType::parallel);
+    return iteratorTypes;
+  }
+
+  SmallVector<Range> getIterationDomain(Operation *op, OpBuilder &b) const {
+    auto storeOp = cast<cpu::StorePtrTileOp>(op);
+    auto valueTy = storeOp.getValue().getType();
+    auto shape = valueTy.getShape();
+
+    SmallVector<Range> ranges = llvm::map_to_vector(shape, [&](int64_t s) {
+      OpFoldResult zero = b.getIndexAttr(0);
+      OpFoldResult one = b.getIndexAttr(1);
+      return Range{
+          /*offset=*/zero,
+          /*size=*/b.getIndexAttr(s),
+          /*stride=*/one,
+      };
+    });
+    return ranges;
+  }
+
+  FailureOr<TilingResult>
+  getTiledImplementation(Operation *op, OpBuilder &b,
+                         ArrayRef<OpFoldResult> offsets,
+                         ArrayRef<OpFoldResult> sizes) const {
+    auto storeOp = cast<cpu::StorePtrTileOp>(op);
+    auto valueTy = storeOp.getValue().getType();
+    Location loc = storeOp.getLoc();
+
+    if (offsets.size() != static_cast<size_t>(valueTy.getRank()) ||
+        sizes.size() != static_cast<size_t>(valueTy.getRank()))
+      return failure();
+
+    SmallVector<OpFoldResult> strides(valueTy.getRank(), b.getIndexAttr(1));
+    auto destSlice = tensor::ExtractSliceOp::create(
+        b, loc, storeOp.getDestination(), offsets, sizes, strides);
+    auto valueSlice = tensor::ExtractSliceOp::create(
+        b, loc, storeOp.getValue(), offsets, sizes, strides);
+
+    auto tiledStore =
+        cpu::StorePtrTileOp::create(b, loc, destSlice, valueSlice);
+    return TilingResult{{tiledStore.getOperation()},
+                        {},
+                        {destSlice.getOperation(), valueSlice.getOperation()}};
+  }
+};
+
 } // namespace
 
 namespace mlir {
@@ -90,6 +144,7 @@ namespace cpu {
 void registerTilingInterfaceExternalModels(DialectRegistry &registry) {
   registry.addExtension(+[](MLIRContext *ctx, CudaTileCPUDialect *dialect) {
     LoadPtrTileOp::attachInterface<LoadPtrTileOpTilingInterface>(*ctx);
+    StorePtrTileOp::attachInterface<StorePtrTileOpTilingInterface>(*ctx);
   });
 }
 

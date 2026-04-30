@@ -28,6 +28,7 @@ def LowerCudaTileCPUMemOps : Pass<"lower-cuda-tile-cpu-mem-ops", "mlir::ModuleOp
                            "mlir::arith::ArithDialect",
                            "mlir::math::MathDialect",
                            "mlir::tensor::TensorDialect",
+                           "mlir::vector::VectorDialect",
                            "mlir::linalg::LinalgDialect",
                            "mlir::bufferization::BufferizationDialect",
                            "mlir::scf::SCFDialect",
