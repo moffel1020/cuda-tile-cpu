@@ -70,6 +70,15 @@ struct LoadPtrTileOpTilingInterface
     resultSizes = SmallVector<OpFoldResult>(sizes);
     return success();
   };
+
+  FailureOr<TilingResult>
+  generateResultTileValue(Operation *op, OpBuilder &b, unsigned resultNumber,
+                          ArrayRef<OpFoldResult> offsets,
+                          ArrayRef<OpFoldResult> sizes) const {
+    if (resultNumber != 0)
+      return failure();
+    return getTiledImplementation(op, b, offsets, sizes);
+  }
 };
 
 } // namespace

@@ -62,7 +62,7 @@ struct GetNumBlocksPattern : public OpRewritePattern<cpu::GetNumBlocksOp> {
                                 PatternRewriter &rewriter) const override {
     auto boundVal = [&](OpFoldResult ofr) -> Value {
       // the upper bounds of the loop come from the function arguments
-      // so this will always create a constant index op
+      // so this will always get the value
       return getValueOrCreateConstantIndexOp(rewriter, op.getLoc(), ofr);
     };
 
