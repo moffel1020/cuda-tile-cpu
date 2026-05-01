@@ -123,11 +123,10 @@ struct LoadPtrTilePattern : public OpConversionPattern<cpu::LoadPtrTileOp> {
     auto ty = op.getType();
 
     auto memTy = MemRefType::get(ty.getShape(), ty.getElementType());
-    auto values = memref::AllocOp::create(rewriter, op.getLoc(), memTy);
-
     auto elemTy = cast<ShapedType>(op.getResult().getType()).getElementType();
 
     if (ty.getRank() == 0) {
+      auto values = memref::AllocOp::create(rewriter, op.getLoc(), memTy);
       auto ptr =
           tensor::ExtractOp::create(rewriter, op.getLoc(), op.getSource(), {});
       auto val = cpu::LoadPtrOp::create(rewriter, op.getLoc(), elemTy, ptr);
@@ -142,13 +141,13 @@ struct LoadPtrTilePattern : public OpConversionPattern<cpu::LoadPtrTileOp> {
       return failure();
     }
 
-    // try to use vector transfer read and write values directly
     if (succeeded(rewriteWithInlineVectorTransfer(op, rewriter, ty))) {
       return success();
     }
 
     // fallback path, use bufferization from and to tensors using intermediate
     // memrefs
+    auto values = memref::AllocOp::create(rewriter, op.getLoc(), memTy);
     auto sourceTy = op.getSource().getType();
     auto srcMemref = bufferization::ToBufferOp::create(
         rewriter, op.getLoc(),
@@ -178,6 +177,68 @@ struct LoadPtrTilePattern : public OpConversionPattern<cpu::LoadPtrTileOp> {
 struct StorePtrTilePattern : OpConversionPattern<cpu::StorePtrTileOp> {
   using OpConversionPattern<cpu::StorePtrTileOp>::OpConversionPattern;
 
+  // When vectorization produces:
+  //   %ptr_tensor = vector.transfer_write %ptr_vec, ...
+  //   %val_tensor = vector.transfer_write %val_vec, ...
+  //   cuda_tile_cpu.store_ptr_tile %ptr_tensor, %val_tensor
+  // avoid materializing both tensors and store directly from the vectors.
+  static LogicalResult
+  rewriteWithInlineVectorTransfer(cpu::StorePtrTileOp op,
+                                  ConversionPatternRewriter &rewriter,
+                                  RankedTensorType ty) {
+    auto destTransferWrite =
+        op.getDestination().getDefiningOp<vector::TransferWriteOp>();
+    if (!destTransferWrite ||
+        destTransferWrite.getResult() != op.getDestination() ||
+        destTransferWrite.getMask() ||
+        !hasOnlyZeroIndices(destTransferWrite.getIndices())) {
+      return failure();
+    }
+
+    auto valueTransferWrite =
+        op.getValue().getDefiningOp<vector::TransferWriteOp>();
+    if (!valueTransferWrite || valueTransferWrite.getResult() != op.getValue() ||
+        valueTransferWrite.getMask() ||
+        !hasOnlyZeroIndices(valueTransferWrite.getIndices())) {
+      return failure();
+    }
+
+    auto ptrVectorTy = destTransferWrite.getVectorType();
+    auto valueVectorTy = valueTransferWrite.getVectorType();
+    if (ptrVectorTy.getRank() != 1 || ptrVectorTy.isScalable() ||
+        ptrVectorTy.getDimSize(0) != ty.getDimSize(0) ||
+        valueVectorTy.getRank() != 1 || valueVectorTy.isScalable() ||
+        valueVectorTy.getDimSize(0) != ty.getDimSize(0)) {
+      return failure();
+    }
+
+    Location loc = op.getLoc();
+    auto lb = arith::ConstantIndexOp::create(rewriter, loc, 0);
+    auto ub = arith::ConstantIndexOp::create(rewriter, loc, ty.getDimSize(0));
+    auto step = arith::ConstantIndexOp::create(rewriter, loc, 1);
+    scf::ForOp::create(
+        rewriter, loc, lb, ub, step, ValueRange{},
+        [&](OpBuilder &b, Location loc, Value iv, ValueRange) {
+          auto ptr = vector::ExtractOp::create(
+              b, loc, destTransferWrite.getValueToStore(),
+              ArrayRef<OpFoldResult>{iv});
+          auto val = vector::ExtractOp::create(
+              b, loc, valueTransferWrite.getValueToStore(),
+              ArrayRef<OpFoldResult>{iv});
+          cpu::StorePtrOp::create(b, loc, ptr, val);
+          scf::YieldOp::create(b, loc);
+        });
+
+    rewriter.eraseOp(op);
+    if (destTransferWrite->use_empty()) {
+      rewriter.eraseOp(destTransferWrite);
+    }
+    if (valueTransferWrite->use_empty()) {
+      rewriter.eraseOp(valueTransferWrite);
+    }
+    return success();
+  }
+
   LogicalResult
   matchAndRewrite(cpu::StorePtrTileOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
@@ -187,6 +248,11 @@ struct StorePtrTilePattern : OpConversionPattern<cpu::StorePtrTileOp> {
       return failure(); // TODO
     }
 
+    if (succeeded(rewriteWithInlineVectorTransfer(op, rewriter, ty))) {
+      return success();
+    }
+
+    // fallback path, use tensor buffers
     auto destTy = op.getDestination().getType();
     auto destMemref = bufferization::ToBufferOp::create(
         rewriter, op.getLoc(),
