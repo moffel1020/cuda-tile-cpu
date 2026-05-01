@@ -2,6 +2,7 @@ add_mlir_dialect_library(CudaTileCPUTransforms
   InsertParallelLoops.cpp
   TileAndFuseIntoStore.cpp
   TilingInterfaceImpl.cpp
+  VectorizeLinalg.cpp
 
   DEPENDS
   CudaTileCPUTransformsIncGen
@@ -9,6 +10,7 @@ add_mlir_dialect_library(CudaTileCPUTransforms
   LINK_LIBS PUBLIC
   CudaTileCPUDialect
   MLIRIR
+  MLIRLinalgTransforms
   MLIRSCFTransforms
   MLIRTensorDialect
   MLIRTransforms

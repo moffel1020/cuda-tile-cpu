@@ -2,6 +2,7 @@
 #define CUDA_TILE_CPU_TRANSFORM_PASSES_H
 
 #include "cuda_tile_cpu/Dialect/CudaTileCPU/IR/Dialect.h"
+#include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Pass/Pass.h"
 
 namespace mlir {

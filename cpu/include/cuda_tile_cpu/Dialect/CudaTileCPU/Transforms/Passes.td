@@ -27,6 +27,31 @@ def TileAndFuseIntoStorePass : Pass<
 
   let dependentDialects = [
     "mlir::scf::SCFDialect",
+    "mlir::linalg::LinalgDialect",
+  ];
+}
+
+def VectorizeLinalgPass : Pass<
+  "cuda-tile-cpu-vectorize-linalg", "::mlir::ModuleOp"
+> {
+  let summary = "Vectorize all vectorizable linalg ops";
+
+  let options = [
+    Option<"vectorizeNDExtract", "vectorize-nd-extract", "bool",
+           /*default=*/"false",
+           "Vectorize tensor.extract operations with rank greater than 1 when "
+           "they appear inside linalg regions.">,
+    Option<"flatten1DDepthwiseConv", "flatten-1d-depthwise-conv", "bool",
+           /*default=*/"false",
+           "Flatten the channel dimension when vectorizing 1D depthwise "
+           "convolutions.">
+  ];
+
+  let dependentDialects = [
+    "mlir::arith::ArithDialect",
+    "mlir::linalg::LinalgDialect",
+    "mlir::tensor::TensorDialect",
+    "mlir::vector::VectorDialect"
   ];
 }
 
