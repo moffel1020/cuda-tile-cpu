@@ -51,8 +51,8 @@ struct LoadPtrTilePattern : public OpConversionPattern<cpu::LoadPtrTileOp> {
   // directly
   static LogicalResult
   rewriteWithoutVectorTransfer(cpu::LoadPtrTileOp op,
-                                  ConversionPatternRewriter &rewriter,
-                                  RankedTensorType ty) {
+                               ConversionPatternRewriter &rewriter,
+                               RankedTensorType ty) {
     // TODO: could allow only a transfer read or only a transfer write, and use
     // bufferization for one side only
 
@@ -184,8 +184,8 @@ struct StorePtrTilePattern : OpConversionPattern<cpu::StorePtrTileOp> {
   // avoid materializing both tensors and store directly from the vectors.
   static LogicalResult
   rewriteWithoutVectorTransfer(cpu::StorePtrTileOp op,
-                                  ConversionPatternRewriter &rewriter,
-                                  RankedTensorType ty) {
+                               ConversionPatternRewriter &rewriter,
+                               RankedTensorType ty) {
     auto destTransferWrite =
         op.getDestination().getDefiningOp<vector::TransferWriteOp>();
     if (!destTransferWrite ||
@@ -197,7 +197,8 @@ struct StorePtrTilePattern : OpConversionPattern<cpu::StorePtrTileOp> {
 
     auto valueTransferWrite =
         op.getValue().getDefiningOp<vector::TransferWriteOp>();
-    if (!valueTransferWrite || valueTransferWrite.getResult() != op.getValue() ||
+    if (!valueTransferWrite ||
+        valueTransferWrite.getResult() != op.getValue() ||
         valueTransferWrite.getMask() ||
         !hasOnlyZeroIndices(valueTransferWrite.getIndices())) {
       return failure();
@@ -216,18 +217,17 @@ struct StorePtrTilePattern : OpConversionPattern<cpu::StorePtrTileOp> {
     auto lb = arith::ConstantIndexOp::create(rewriter, loc, 0);
     auto ub = arith::ConstantIndexOp::create(rewriter, loc, ty.getDimSize(0));
     auto step = arith::ConstantIndexOp::create(rewriter, loc, 1);
-    scf::ForOp::create(
-        rewriter, loc, lb, ub, step, ValueRange{},
-        [&](OpBuilder &b, Location loc, Value iv, ValueRange) {
-          auto ptr = vector::ExtractOp::create(
-              b, loc, destTransferWrite.getValueToStore(),
-              ArrayRef<OpFoldResult>{iv});
-          auto val = vector::ExtractOp::create(
-              b, loc, valueTransferWrite.getValueToStore(),
-              ArrayRef<OpFoldResult>{iv});
-          cpu::StorePtrOp::create(b, loc, ptr, val);
-          scf::YieldOp::create(b, loc);
-        });
+    scf::ForOp::create(rewriter, loc, lb, ub, step, ValueRange{},
+                       [&](OpBuilder &b, Location loc, Value iv, ValueRange) {
+                         auto ptr = vector::ExtractOp::create(
+                             b, loc, destTransferWrite.getValueToStore(),
+                             ArrayRef<OpFoldResult>{iv});
+                         auto val = vector::ExtractOp::create(
+                             b, loc, valueTransferWrite.getValueToStore(),
+                             ArrayRef<OpFoldResult>{iv});
+                         cpu::StorePtrOp::create(b, loc, ptr, val);
+                         scf::YieldOp::create(b, loc);
+                       });
 
     rewriter.eraseOp(op);
     if (destTransferWrite->use_empty()) {
@@ -283,6 +283,20 @@ struct StorePtrTilePattern : OpConversionPattern<cpu::StorePtrTileOp> {
   }
 };
 
+struct LoadMemRefTilePattern
+    : public OpConversionPattern<cpu::LoadMemRefTileOp> {
+  using OpConversionPattern<cpu::LoadMemRefTileOp>::OpConversionPattern;
+  LogicalResult
+  matchAndRewrite(cpu::LoadMemRefTileOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto tensor = bufferization::ToTensorOp::create(
+        rewriter, op.getLoc(), op.getType(), adaptor.getSource(),
+        /*restrict=*/true, /*writable=*/false);
+    rewriter.replaceOp(op, tensor);
+    return success();
+  }
+};
+
 struct LowerCudaTileCPUMemOps
     : public mlir::cuda_tile::cpu::impl::LowerCudaTileCPUMemOpsBase<
           LowerCudaTileCPUMemOps> {
@@ -296,9 +310,13 @@ struct LowerCudaTileCPUMemOps
 
     ConversionTarget target(*context);
     RewritePatternSet patterns(context);
-    patterns.add<LoadPtrTilePattern, StorePtrTilePattern>(context);
+    patterns
+        .add<LoadPtrTilePattern, StorePtrTilePattern, LoadMemRefTilePattern>(
+            context);
 
-    target.addIllegalOp<cpu::LoadPtrTileOp, cpu::StorePtrTileOp>();
+    target.addIllegalOp<cpu::LoadPtrTileOp, cpu::StorePtrTileOp,
+                        cpu::LoadMemRefTileOp>();
+
     target.addLegalDialect<
         arith::ArithDialect, affine::AffineDialect, func::FuncDialect,
         memref::MemRefDialect, bufferization::BufferizationDialect,
