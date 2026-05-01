@@ -54,6 +54,17 @@ def CudaTileCPU_LoadMemRefTileOp : CudaTileCPU_Op<"load_memref_tile", [
   let assemblyFormat = "$source attr-dict `:` type($source) `->` type($result)";
 }
 
+def CudaTileCPU_StoreMemRefTileOp : CudaTileCPU_Op<"store_memref_tile", [
+  MemoryEffects<[MemWrite]>
+]> {
+  let summary = "Store a tensor tile to a structured memref";
+
+  let arguments = (ins AnyRankedTensor:$value,
+                       AnyRankedOrUnrankedMemRef:$destination);
+
+  let assemblyFormat = "$value `,` $destination attr-dict `:` type($value) `,` type($destination)";
+}
+
 def CudaTileCPU_GetNumBlocksOp : CudaTileCPU_Op<"get_num_blocks", [
   Pure,
   AllTypesMatch<["gridSize_x", "gridSize_y", "gridSize_z"]>

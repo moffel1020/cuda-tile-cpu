@@ -1260,6 +1260,64 @@ static Value extractScalarTensor(Location loc, Value value,
   return value;
 }
 
+static FailureOr<memref::SubViewOp>
+createSubviewFromPartitionView(Operation *op, Value originalView,
+                               Value convertedView, ValueRange indices,
+                               ConversionPatternRewriter &rewriter) {
+  auto partitionViewType =
+      dyn_cast<cuda_tile::PartitionViewType>(originalView.getType());
+  if (!partitionViewType) {
+    return rewriter.notifyMatchFailure(
+        op, "only partition_view loads and stores are supported");
+  }
+
+  auto dimMap = partitionViewType.getDimMap();
+  for (auto [index, dim] : llvm::enumerate(dimMap)) {
+    if (static_cast<int64_t>(dim) != index) {
+      return rewriter.notifyMatchFailure(
+          op,
+          "non-identity partition view dim_map is not yet supported in cuda "
+          "tile cpu");
+    }
+  }
+
+  auto memrefType = dyn_cast<MemRefType>(convertedView.getType());
+  if (!memrefType) {
+    return failure();
+  }
+
+  Location loc = op->getLoc();
+  ArrayRef<int32_t> tileShape = partitionViewType.getTileShape().asArrayRef();
+
+  if (tileShape.size() != memrefType.getRank() ||
+      indices.size() != memrefType.getRank()) {
+    return rewriter.notifyMatchFailure(
+        op, "partition view rank must match memref and index ranks");
+  }
+
+  SmallVector<OpFoldResult> offsets;
+  offsets.reserve(memrefType.getRank());
+  for (auto [indexValue, tileSize] : llvm::zip_equal(indices, tileShape)) {
+    Value index = extractScalarTensorAsIndex(loc, indexValue, rewriter);
+    Value tileSizeValue =
+        arith::ConstantIndexOp::create(rewriter, loc, tileSize);
+    auto offset = arith::MulIOp::create(rewriter, loc, index, tileSizeValue);
+    offsets.push_back(offset.getResult());
+  }
+
+  SmallVector<OpFoldResult> sizes;
+  SmallVector<OpFoldResult> strides;
+  sizes.reserve(tileShape.size());
+  strides.reserve(tileShape.size());
+  for (int32_t tileSize : tileShape) {
+    sizes.push_back(rewriter.getIndexAttr(tileSize));
+    strides.push_back(rewriter.getIndexAttr(1));
+  }
+
+  return memref::SubViewOp::create(rewriter, loc, convertedView, offsets, sizes,
+                                   strides);
+}
+
 struct MakeTensorViewPattern
     : public OpConversionPattern<cuda_tile::MakeTensorViewOp> {
   using OpConversionPattern<cuda_tile::MakeTensorViewOp>::OpConversionPattern;
@@ -1318,65 +1376,40 @@ struct LoadViewTkoPattern
   LogicalResult
   matchAndRewrite(cuda_tile::LoadViewTkoOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    auto partitionViewType =
-        dyn_cast<cuda_tile::PartitionViewType>(op.getView().getType());
-    if (!partitionViewType) {
-      return rewriter.notifyMatchFailure(
-          op, "only partition_view loads are supported");
-    }
+    auto resultType = cast<RankedTensorType>(
+        getTypeConverter()->convertType(op.getTile().getType()));
 
-    auto dimMap = partitionViewType.getDimMap();
-    for (auto [index, dim] : llvm::enumerate(dimMap)) {
-      if (static_cast<int64_t>(dim) != index) {
-        return rewriter.notifyMatchFailure(
-            op,
-            "non-identity partition view dim_map is not yet supported in cuda "
-            "tile cpu");
-      }
-    }
+    FailureOr<memref::SubViewOp> subview = createSubviewFromPartitionView(
+        op, op.getView(), adaptor.getView(), adaptor.getIndex(), rewriter);
 
-    auto sourceType = dyn_cast<MemRefType>(adaptor.getView().getType());
-    if (!sourceType) {
+    if (failed(subview)) {
       return failure();
     }
 
-    auto resultType = cast<RankedTensorType>(
-        getTypeConverter()->convertType(op.getTile().getType()));
-    Location loc = op.getLoc();
-    ArrayRef<int32_t> tileShape = partitionViewType.getTileShape().asArrayRef();
-
-    if (tileShape.size() != sourceType.getRank() ||
-        adaptor.getIndex().size() != sourceType.getRank()) {
-      return rewriter.notifyMatchFailure(
-          op, "partition view rank must match memref and index ranks");
-    }
-
-    SmallVector<OpFoldResult> offsets;
-    offsets.reserve(sourceType.getRank());
-    for (auto [indexValue, tileSize] :
-         llvm::zip_equal(adaptor.getIndex(), tileShape)) {
-      Value index = extractScalarTensorAsIndex(loc, indexValue, rewriter);
-      Value tileSizeValue =
-          arith::ConstantIndexOp::create(rewriter, loc, tileSize);
-      auto offset = arith::MulIOp::create(rewriter, loc, index, tileSizeValue);
-      offsets.push_back(offset.getResult());
-    }
-
-    SmallVector<OpFoldResult> sizes;
-    SmallVector<OpFoldResult> strides;
-    sizes.reserve(tileShape.size());
-    strides.reserve(tileShape.size());
-    for (int32_t tileSize : tileShape) {
-      sizes.push_back(rewriter.getIndexAttr(tileSize));
-      strides.push_back(rewriter.getIndexAttr(1));
-    }
-
-    auto subview = memref::SubViewOp::create(rewriter, loc, adaptor.getView(),
-                                             offsets, sizes, strides);
-    auto load = cpu::LoadMemRefTileOp::create(rewriter, loc, resultType,
-                                              subview.getResult());
+    auto load = cpu::LoadMemRefTileOp::create(rewriter, op.getLoc(), resultType,
+                                              subview->getResult());
 
     rewriter.replaceOp(op, load);
+    return success();
+  }
+};
+
+struct StoreViewTkoPattern
+    : public OpConversionPattern<cuda_tile::StoreViewTkoOp> {
+  using OpConversionPattern<cuda_tile::StoreViewTkoOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(cuda_tile::StoreViewTkoOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    FailureOr<memref::SubViewOp> subview = createSubviewFromPartitionView(
+        op, op.getView(), adaptor.getView(), adaptor.getIndex(), rewriter);
+
+    if (failed(subview)) {
+      return failure();
+    }
+
+    rewriter.replaceOpWithNewOp<cpu::StoreMemRefTileOp>(op, adaptor.getTile(),
+                                                        subview->getResult());
     return success();
   }
 };
@@ -1457,8 +1490,9 @@ struct ConvertCudaTileToStandard
         FToIPattern, FToFPattern, IToFPattern, TruncIPattern, MmaIPattern,
         YieldPattern, IfPattern, PrintTkoPattern, LoadPtrTkoPattern,
         StorePtrTkoPattern, MakeTensorViewPattern, MakePartitionViewPattern,
-        LoadViewTkoPattern, GetTileBlockIdPattern, GetNumTileBlocksPattern,
-        MoveOutOfCudaTileModule>(typeConverter, context);
+        LoadViewTkoPattern, StoreViewTkoPattern, GetTileBlockIdPattern,
+        GetNumTileBlocksPattern, MoveOutOfCudaTileModule>(typeConverter,
+                                                          context);
 
     target.addIllegalDialect<CudaTileDialect>();
     target.addLegalDialect<
