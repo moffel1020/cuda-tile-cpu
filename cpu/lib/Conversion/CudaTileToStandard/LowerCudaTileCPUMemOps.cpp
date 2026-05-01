@@ -297,6 +297,21 @@ struct LoadMemRefTilePattern
   }
 };
 
+struct StoreMemRefTilePattern
+    : public OpConversionPattern<cpu::StoreMemRefTileOp> {
+  using OpConversionPattern<cpu::StoreMemRefTileOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(cpu::StoreMemRefTileOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto materialize = bufferization::MaterializeInDestinationOp::create(
+        rewriter, op.getLoc(), Type{}, adaptor.getValue(),
+        adaptor.getDestination(), /*restrict=*/false, /*writable=*/true);
+    rewriter.replaceOp(op, materialize);
+    return success();
+  }
+};
+
 struct LowerCudaTileCPUMemOps
     : public mlir::cuda_tile::cpu::impl::LowerCudaTileCPUMemOpsBase<
           LowerCudaTileCPUMemOps> {
@@ -310,12 +325,11 @@ struct LowerCudaTileCPUMemOps
 
     ConversionTarget target(*context);
     RewritePatternSet patterns(context);
-    patterns
-        .add<LoadPtrTilePattern, StorePtrTilePattern, LoadMemRefTilePattern>(
-            context);
+    patterns.add<LoadPtrTilePattern, StorePtrTilePattern, LoadMemRefTilePattern,
+                 StoreMemRefTilePattern>(context);
 
     target.addIllegalOp<cpu::LoadPtrTileOp, cpu::StorePtrTileOp,
-                        cpu::LoadMemRefTileOp>();
+                        cpu::LoadMemRefTileOp, cpu::StoreMemRefTileOp>();
 
     target.addLegalDialect<
         arith::ArithDialect, affine::AffineDialect, func::FuncDialect,
