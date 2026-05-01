@@ -50,7 +50,7 @@ struct LoadPtrTilePattern : public OpConversionPattern<cpu::LoadPtrTileOp> {
   // to prevent bufferization, we add this rewrite, which operates on the vector
   // directly
   static LogicalResult
-  rewriteWithInlineVectorTransfer(cpu::LoadPtrTileOp op,
+  rewriteWithoutVectorTransfer(cpu::LoadPtrTileOp op,
                                   ConversionPatternRewriter &rewriter,
                                   RankedTensorType ty) {
     // TODO: could allow only a transfer read or only a transfer write, and use
@@ -141,7 +141,7 @@ struct LoadPtrTilePattern : public OpConversionPattern<cpu::LoadPtrTileOp> {
       return failure();
     }
 
-    if (succeeded(rewriteWithInlineVectorTransfer(op, rewriter, ty))) {
+    if (succeeded(rewriteWithoutVectorTransfer(op, rewriter, ty))) {
       return success();
     }
 
@@ -183,7 +183,7 @@ struct StorePtrTilePattern : OpConversionPattern<cpu::StorePtrTileOp> {
   //   cuda_tile_cpu.store_ptr_tile %ptr_tensor, %val_tensor
   // avoid materializing both tensors and store directly from the vectors.
   static LogicalResult
-  rewriteWithInlineVectorTransfer(cpu::StorePtrTileOp op,
+  rewriteWithoutVectorTransfer(cpu::StorePtrTileOp op,
                                   ConversionPatternRewriter &rewriter,
                                   RankedTensorType ty) {
     auto destTransferWrite =
@@ -248,7 +248,7 @@ struct StorePtrTilePattern : OpConversionPattern<cpu::StorePtrTileOp> {
       return failure(); // TODO
     }
 
-    if (succeeded(rewriteWithInlineVectorTransfer(op, rewriter, ty))) {
+    if (succeeded(rewriteWithoutVectorTransfer(op, rewriter, ty))) {
       return success();
     }
 

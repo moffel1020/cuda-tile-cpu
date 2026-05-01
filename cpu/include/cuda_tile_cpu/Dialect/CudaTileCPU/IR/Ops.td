@@ -24,13 +24,34 @@ def CudaTileCPU_PrintOp : CudaTileCPU_Op<"print", [MemoryEffects<[MemRead, MemWr
   }];
 }
 
-def CudaTileCPU_MakeMemRefOp : CudaTileCPU_Op<"make_memref", [Pure]> {
+def CudaTileCPU_MakeMemRefOp : CudaTileCPU_Op<"make_memref", [
+  Pure,
+  AttrSizedOperandSegments
+]> {
   let summary = "Make a memref from a pointer";
 
-  let arguments = (ins I64:$ptr);
-  let results = (outs AnyRankedOrUnrankedMemRef:$result); // TODO: dynamic shape/strides
+  let arguments = (ins I64:$ptr,
+                       Variadic<Index>:$dynamicSizes,
+                       Variadic<Index>:$dynamicStrides);
+  let results = (outs AnyRankedOrUnrankedMemRef:$result);
 
-  let assemblyFormat = "$ptr attr-dict `:` type($ptr) `->` type($result)";
+  let assemblyFormat = [{
+    $ptr
+    `sizes` `[` $dynamicSizes `]`
+    `strides` `[` $dynamicStrides `]`
+    attr-dict `:` type($ptr) `->` type($result)
+  }];
+}
+
+def CudaTileCPU_LoadMemRefTileOp : CudaTileCPU_Op<"load_memref_tile", [
+  MemoryEffects<[MemRead]>
+]> {
+  let summary = "Load a tensor tile from a structured memref";
+
+  let arguments = (ins AnyRankedOrUnrankedMemRef:$source);
+  let results = (outs AnyRankedTensor:$result);
+
+  let assemblyFormat = "$source attr-dict `:` type($source) `->` type($result)";
 }
 
 def CudaTileCPU_GetNumBlocksOp : CudaTileCPU_Op<"get_num_blocks", [

@@ -47,6 +47,10 @@ public:
     addConversion([&](cuda_tile::TensorViewType type) -> Type {
       return convertTensorViewToMemRef(type);
     });
+
+    addConversion([&](cuda_tile::PartitionViewType type) -> Type {
+      return convertTensorViewToMemRef(type.getTensorView());
+    });
   }
 
 private:
@@ -62,7 +66,10 @@ private:
   Type convertTensorViewToMemRef(cuda_tile::TensorViewType type) const {
     auto shape = type.getShape();
     Type elemTy = type.getElementType();
-    return MemRefType::get(shape, elemTy);
+    auto layout =
+        StridedLayoutAttr::get(type.getContext(), /*offset=*/0,
+                               llvm::ArrayRef<int64_t>(type.getStrides()));
+    return MemRefType::get(shape, elemTy, layout);
   }
 
   Type convertCudaTilePtr(cuda_tile::PointerType ptrType) const {
@@ -1081,7 +1088,8 @@ struct PrintTkoPattern : public OpConversionPattern<cuda_tile::PrintTkoOp> {
     SmallVector<StringRef> splitStrings = splitFormatString(op.getStr());
     assert(splitStrings.size() >= op.getNumOperands());
 
-    for (auto [arg, str] : llvm::zip(op.getArgs(), splitStrings)) {
+    for (auto [arg, convertedArg, str] :
+         llvm::zip(op.getArgs(), adaptor.getArgs(), splitStrings)) {
       if (!isa<TileType>(arg.getType())) {
         return rewriter.notifyMatchFailure(op,
                                            "print operands should be tiles");
@@ -1094,8 +1102,7 @@ struct PrintTkoPattern : public OpConversionPattern<cuda_tile::PrintTkoOp> {
       auto unrankedMem = UnrankedMemRefType::get(tile.getElementType(), {});
 
       auto bufferizeOp = bufferization::ToBufferOp::create(
-          rewriter, loc, memType, rewriter.getRemappedValue(arg),
-          /*read_only=*/true);
+          rewriter, loc, memType, convertedArg, /*read_only=*/true);
       auto castOp = memref::CastOp::create(rewriter, loc, unrankedMem,
                                            bufferizeOp.getResult());
 
@@ -1223,6 +1230,36 @@ struct StorePtrTkoPattern
   }
 };
 
+static Value extractScalarTensorAsIndex(Location loc, Value value,
+                                        ConversionPatternRewriter &rewriter) {
+  if (isa<IndexType>(value.getType())) {
+    return value;
+  }
+
+  if (auto tensorType = dyn_cast<RankedTensorType>(value.getType())) {
+    if (tensorType.getRank() == 0) {
+      value = tensor::ExtractOp::create(rewriter, loc, value, ValueRange{});
+    }
+  }
+
+  if (isa<IndexType>(value.getType())) {
+    return value;
+  }
+
+  return arith::IndexCastUIOp::create(rewriter, loc, rewriter.getIndexType(),
+                                      value);
+}
+
+static Value extractScalarTensor(Location loc, Value value,
+                                 ConversionPatternRewriter &rewriter) {
+  if (auto tensorType = dyn_cast<RankedTensorType>(value.getType())) {
+    if (tensorType.getRank() == 0) {
+      return tensor::ExtractOp::create(rewriter, loc, value, ValueRange{});
+    }
+  }
+  return value;
+}
+
 struct MakeTensorViewPattern
     : public OpConversionPattern<cuda_tile::MakeTensorViewOp> {
   using OpConversionPattern<cuda_tile::MakeTensorViewOp>::OpConversionPattern;
@@ -1230,15 +1267,35 @@ struct MakeTensorViewPattern
   LogicalResult
   matchAndRewrite(cuda_tile::MakeTensorViewOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    // auto ptr =
-    //     tensor::ExtractOp::create(rewriter, op.getLoc(), adaptor.getBase(),
-    //     {});
-    // auto ty = op.getType();
-    // auto memTy = MemRefType::get(ty.getShape(), ty.getElementType());
-    // // TODO: sizes/strides, possibly dynamic
-    // auto newOp = cpu::MakeMemRefOp::create(rewriter, op.getLoc(), memTy,
-    // ptr); rewriter.replaceOp(op, newOp);
-    return failure();
+    auto memrefType =
+        dyn_cast<MemRefType>(getTypeConverter()->convertType(op.getType()));
+    if (!memrefType) {
+      return failure();
+    }
+
+    Location loc = op.getLoc();
+    Value base = extractScalarTensor(loc, adaptor.getBase(), rewriter);
+    if (!base.getType().isInteger(64)) {
+      return rewriter.notifyMatchFailure(
+          op, "expected converted tensor view base to be an i64 pointer");
+    }
+
+    SmallVector<Value> dynamicSizes;
+    dynamicSizes.reserve(adaptor.getDynamicShape().size());
+    for (Value size : adaptor.getDynamicShape()) {
+      dynamicSizes.push_back(extractScalarTensorAsIndex(loc, size, rewriter));
+    }
+
+    SmallVector<Value> dynamicStrides;
+    dynamicStrides.reserve(adaptor.getDynamicStrides().size());
+    for (Value stride : adaptor.getDynamicStrides()) {
+      dynamicStrides.push_back(
+          extractScalarTensorAsIndex(loc, stride, rewriter));
+    }
+
+    rewriter.replaceOpWithNewOp<cpu::MakeMemRefOp>(
+        op, memrefType, base, dynamicSizes, dynamicStrides);
+    return success();
   }
 };
 
@@ -1249,10 +1306,9 @@ struct MakePartitionViewPattern
   LogicalResult
   matchAndRewrite(cuda_tile::MakePartitionViewOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    // rewriter.replaceOp(op,
-    //                    op.getTensorView()); // TODO: idk if this is ok. maybe
-    //                                         // DCE should just handle it?
-    return failure();
+    // partition will be used in LoadViewTkoPattern directly, no op needed here
+    rewriter.replaceOp(op, adaptor.getTensorView());
+    return success();
   }
 };
 
@@ -1262,58 +1318,66 @@ struct LoadViewTkoPattern
   LogicalResult
   matchAndRewrite(cuda_tile::LoadViewTkoOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    //   auto view = op.getView();
-    //   auto partitionViewOp =
-    //   view.getDefiningOp<cuda_tile::MakePartitionViewOp>(); if
-    //   (!partitionViewOp) {
-    //     return rewriter.notifyMatchFailure(
-    //         op, "expected make_partition_view as view producer");
-    //   }
+    auto partitionViewType =
+        dyn_cast<cuda_tile::PartitionViewType>(op.getView().getType());
+    if (!partitionViewType) {
+      return rewriter.notifyMatchFailure(
+          op, "only partition_view loads are supported");
+    }
 
-    //   auto tensorView = partitionViewOp.getTensorView();
-    //   Value baseMemRef = rewriter.getRemappedValue(tensorView);
-    //   llvm::errs() << baseMemRef << "\n";
-    //   if (!baseMemRef) {
-    //     return failure();
-    //   }
+    auto dimMap = partitionViewType.getDimMap();
+    for (auto [index, dim] : llvm::enumerate(dimMap)) {
+      if (static_cast<int64_t>(dim) != index) {
+        return rewriter.notifyMatchFailure(
+            op,
+            "non-identity partition view dim_map is not yet supported in cuda "
+            "tile cpu");
+      }
+    }
 
-    //   auto partitionView = cast<PartitionViewType>(view.getType());
-    //   auto tileShape = partitionView.getTileShape();
-    //   SmallVector<Value> indices =
-    //       llvm::map_to_vector(adaptor.getIndex(), [&](auto val) {
-    //         auto idx = tensor::ExtractOp::create(rewriter, op.getLoc(), val,
-    //         {}); return static_cast<Value>(arith::IndexCastOp::create(
-    //             rewriter, op.getLoc(), rewriter.getIndexType(), idx));
-    //       });
+    auto sourceType = dyn_cast<MemRefType>(adaptor.getView().getType());
+    if (!sourceType) {
+      return failure();
+    }
 
-    //   // TODO: handle static offsets/sizes/strides properly, currently
-    //   everything
-    //   // is dynamic i think
-    //   SmallVector<OpFoldResult> offsets, sizes, strides;
-    //   for (auto [idx, tileSize] : llvm::zip(indices, tileShape.asArrayRef()))
-    //   {
-    //     Value tileSizeVal =
-    //         arith::ConstantIndexOp::create(rewriter, op.getLoc(), tileSize);
-    //     offsets.emplace_back(
-    //         arith::MulIOp::create(rewriter, op.getLoc(), idx, tileSizeVal));
-    //     sizes.emplace_back(rewriter.getIndexAttr(tileSize));
-    //     strides.emplace_back(rewriter.getIndexAttr(1));
-    //   }
+    auto resultType = cast<RankedTensorType>(
+        getTypeConverter()->convertType(op.getTile().getType()));
+    Location loc = op.getLoc();
+    ArrayRef<int32_t> tileShape = partitionViewType.getTileShape().asArrayRef();
 
-    //   auto subview = memref::SubViewOp::create(rewriter, op.getLoc(),
-    //   baseMemRef,
-    //                                            offsets, sizes, strides);
+    if (tileShape.size() != sourceType.getRank() ||
+        adaptor.getIndex().size() != sourceType.getRank()) {
+      return rewriter.notifyMatchFailure(
+          op, "partition view rank must match memref and index ranks");
+    }
 
-    //   auto svTy = subview.getResult().getType();
-    //   auto memTy = cast<BaseMemRefType>(baseMemRef.getType());
-    //   auto tensorTy =
-    //       RankedTensorType::get(svTy.getShape(), svTy.getElementType());
-    //   auto tensor = bufferization::ToTensorOp::create(rewriter, op.getLoc(),
-    //                                                   tensorTy, subview,
-    //                                                   true);
+    SmallVector<OpFoldResult> offsets;
+    offsets.reserve(sourceType.getRank());
+    for (auto [indexValue, tileSize] :
+         llvm::zip_equal(adaptor.getIndex(), tileShape)) {
+      Value index = extractScalarTensorAsIndex(loc, indexValue, rewriter);
+      Value tileSizeValue =
+          arith::ConstantIndexOp::create(rewriter, loc, tileSize);
+      auto offset = arith::MulIOp::create(rewriter, loc, index, tileSizeValue);
+      offsets.push_back(offset.getResult());
+    }
 
-    //   rewriter.replaceOp(op, tensor);
-    return failure();
+    SmallVector<OpFoldResult> sizes;
+    SmallVector<OpFoldResult> strides;
+    sizes.reserve(tileShape.size());
+    strides.reserve(tileShape.size());
+    for (int32_t tileSize : tileShape) {
+      sizes.push_back(rewriter.getIndexAttr(tileSize));
+      strides.push_back(rewriter.getIndexAttr(1));
+    }
+
+    auto subview = memref::SubViewOp::create(rewriter, loc, adaptor.getView(),
+                                             offsets, sizes, strides);
+    auto load = cpu::LoadMemRefTileOp::create(rewriter, loc, resultType,
+                                              subview.getResult());
+
+    rewriter.replaceOp(op, load);
+    return success();
   }
 };
 
