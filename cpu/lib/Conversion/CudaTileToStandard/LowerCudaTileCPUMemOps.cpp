@@ -311,8 +311,8 @@ createMemRefTileSubview(Operation *op, Value source, ValueRange offsets,
     strides.push_back(rewriter.getIndexAttr(1));
   }
 
-  return memref::SubViewOp::create(rewriter, op->getLoc(), source,
-                                   mixedOffsets, sizes, strides);
+  return memref::SubViewOp::create(rewriter, op->getLoc(), source, mixedOffsets,
+                                   sizes, strides);
 }
 
 struct LoadMemRefTilePattern
@@ -345,15 +345,14 @@ struct StoreMemRefTilePattern
                   ConversionPatternRewriter &rewriter) const override {
     auto tileType = cast<RankedTensorType>(op.getValue().getType());
     FailureOr<memref::SubViewOp> subview = createMemRefTileSubview(
-        op, adaptor.getDestination(), adaptor.getOffsets(), tileType,
-        rewriter);
+        op, adaptor.getDestination(), adaptor.getOffsets(), tileType, rewriter);
     if (failed(subview)) {
       return failure();
     }
 
     auto materialize = bufferization::MaterializeInDestinationOp::create(
-        rewriter, op.getLoc(), Type{}, adaptor.getValue(),
-        subview->getResult(), /*restrict=*/false, /*writable=*/true);
+        rewriter, op.getLoc(), Type{}, adaptor.getValue(), subview->getResult(),
+        /*restrict=*/false, /*writable=*/true);
     rewriter.replaceOp(op, materialize);
     return success();
   }
