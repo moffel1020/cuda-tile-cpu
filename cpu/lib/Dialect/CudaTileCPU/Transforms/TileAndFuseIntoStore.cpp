@@ -60,7 +60,7 @@ static void fuseProducersGreedily(IRRewriter &rewriter,
 
   while (!worklist.empty()) {
     tensor::ExtractSliceOp candidateSlice = worklist.pop_back_val();
-    if (!candidateSlice || candidateSlice->use_empty()) {
+    if (!candidateSlice || candidateSlice.use_empty()) {
       continue;
     }
 
@@ -71,7 +71,7 @@ static void fuseProducersGreedily(IRRewriter &rewriter,
     }
 
     appendGeneratedSlices(worklist, fusedResult->generatedSlices);
-    if (candidateSlice->use_empty()) {
+    if (candidateSlice.use_empty()) {
       rewriter.eraseOp(candidateSlice);
     }
   }
@@ -91,10 +91,6 @@ struct TileAndFuseIntoStorePass
     mod.walk([&](cpu::StorePtrTileOp storeOp) { storeOps.push_back(storeOp); });
 
     for (cpu::StorePtrTileOp storeOp : storeOps) {
-      if (!storeOp->getBlock()) {
-        continue;
-      }
-
       auto tileableStore = dyn_cast<TilingInterface>(storeOp.getOperation());
       if (!tileableStore) {
         storeOp.emitOpError(

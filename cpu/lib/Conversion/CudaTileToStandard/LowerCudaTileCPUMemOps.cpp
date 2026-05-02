@@ -283,14 +283,53 @@ struct StorePtrTilePattern : OpConversionPattern<cpu::StorePtrTileOp> {
   }
 };
 
+static FailureOr<memref::SubViewOp>
+createMemRefTileSubview(Operation *op, Value source, ValueRange offsets,
+                        RankedTensorType tileType,
+                        ConversionPatternRewriter &rewriter) {
+  auto sourceType = dyn_cast<MemRefType>(source.getType());
+  if (!sourceType) {
+    return failure();
+  }
+  if (sourceType.getRank() != tileType.getRank() ||
+      offsets.size() != sourceType.getRank()) {
+    return op->emitOpError("expected memref, tensor tile, and offset ranks to "
+                           "match");
+  }
+  if (!tileType.hasStaticShape()) {
+    return op->emitOpError("dynamic load/store memref tile shapes are not "
+                           "supported yet");
+  }
+
+  SmallVector<OpFoldResult> mixedOffsets(offsets.begin(), offsets.end());
+  SmallVector<OpFoldResult> sizes;
+  SmallVector<OpFoldResult> strides;
+  sizes.reserve(tileType.getRank());
+  strides.reserve(tileType.getRank());
+  for (int64_t size : tileType.getShape()) {
+    sizes.push_back(rewriter.getIndexAttr(size));
+    strides.push_back(rewriter.getIndexAttr(1));
+  }
+
+  return memref::SubViewOp::create(rewriter, op->getLoc(), source,
+                                   mixedOffsets, sizes, strides);
+}
+
 struct LoadMemRefTilePattern
     : public OpConversionPattern<cpu::LoadMemRefTileOp> {
   using OpConversionPattern<cpu::LoadMemRefTileOp>::OpConversionPattern;
   LogicalResult
   matchAndRewrite(cpu::LoadMemRefTileOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+    auto tileType = cast<RankedTensorType>(op.getType());
+    FailureOr<memref::SubViewOp> subview = createMemRefTileSubview(
+        op, adaptor.getSource(), adaptor.getOffsets(), tileType, rewriter);
+    if (failed(subview)) {
+      return failure();
+    }
+
     auto tensor = bufferization::ToTensorOp::create(
-        rewriter, op.getLoc(), op.getType(), adaptor.getSource(),
+        rewriter, op.getLoc(), op.getType(), subview->getResult(),
         /*restrict=*/true, /*writable=*/false);
     rewriter.replaceOp(op, tensor);
     return success();
@@ -304,9 +343,17 @@ struct StoreMemRefTilePattern
   LogicalResult
   matchAndRewrite(cpu::StoreMemRefTileOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+    auto tileType = cast<RankedTensorType>(op.getValue().getType());
+    FailureOr<memref::SubViewOp> subview = createMemRefTileSubview(
+        op, adaptor.getDestination(), adaptor.getOffsets(), tileType,
+        rewriter);
+    if (failed(subview)) {
+      return failure();
+    }
+
     auto materialize = bufferization::MaterializeInDestinationOp::create(
         rewriter, op.getLoc(), Type{}, adaptor.getValue(),
-        adaptor.getDestination(), /*restrict=*/false, /*writable=*/true);
+        subview->getResult(), /*restrict=*/false, /*writable=*/true);
     rewriter.replaceOp(op, materialize);
     return success();
   }

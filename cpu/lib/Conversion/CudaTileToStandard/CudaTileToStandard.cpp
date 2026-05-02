@@ -1260,10 +1260,10 @@ static Value extractScalarTensor(Location loc, Value value,
   return value;
 }
 
-static FailureOr<memref::SubViewOp>
-createSubviewFromPartitionView(Operation *op, Value originalView,
-                               Value convertedView, ValueRange indices,
-                               ConversionPatternRewriter &rewriter) {
+static FailureOr<SmallVector<Value>>
+getPartitionTileOffsets(Operation *op, Value originalView, Value convertedView,
+                        ValueRange indices,
+                        ConversionPatternRewriter &rewriter) {
   auto partitionViewType =
       dyn_cast<cuda_tile::PartitionViewType>(originalView.getType());
   if (!partitionViewType) {
@@ -1295,7 +1295,7 @@ createSubviewFromPartitionView(Operation *op, Value originalView,
         op, "partition view rank must match memref and index ranks");
   }
 
-  SmallVector<OpFoldResult> offsets;
+  SmallVector<Value> offsets;
   offsets.reserve(memrefType.getRank());
   for (auto [indexValue, tileSize] : llvm::zip_equal(indices, tileShape)) {
     Value index = extractScalarTensorAsIndex(loc, indexValue, rewriter);
@@ -1305,17 +1305,7 @@ createSubviewFromPartitionView(Operation *op, Value originalView,
     offsets.push_back(offset.getResult());
   }
 
-  SmallVector<OpFoldResult> sizes;
-  SmallVector<OpFoldResult> strides;
-  sizes.reserve(tileShape.size());
-  strides.reserve(tileShape.size());
-  for (int32_t tileSize : tileShape) {
-    sizes.push_back(rewriter.getIndexAttr(tileSize));
-    strides.push_back(rewriter.getIndexAttr(1));
-  }
-
-  return memref::SubViewOp::create(rewriter, loc, convertedView, offsets, sizes,
-                                   strides);
+  return offsets;
 }
 
 struct MakeTensorViewPattern
@@ -1379,15 +1369,15 @@ struct LoadViewTkoPattern
     auto resultType = cast<RankedTensorType>(
         getTypeConverter()->convertType(op.getTile().getType()));
 
-    FailureOr<memref::SubViewOp> subview = createSubviewFromPartitionView(
+    FailureOr<SmallVector<Value>> offsets = getPartitionTileOffsets(
         op, op.getView(), adaptor.getView(), adaptor.getIndex(), rewriter);
 
-    if (failed(subview)) {
+    if (failed(offsets)) {
       return failure();
     }
 
     auto load = cpu::LoadMemRefTileOp::create(rewriter, op.getLoc(), resultType,
-                                              subview->getResult());
+                                              adaptor.getView(), *offsets);
 
     rewriter.replaceOp(op, load);
     return success();
@@ -1401,15 +1391,16 @@ struct StoreViewTkoPattern
   LogicalResult
   matchAndRewrite(cuda_tile::StoreViewTkoOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    FailureOr<memref::SubViewOp> subview = createSubviewFromPartitionView(
+    FailureOr<SmallVector<Value>> offsets = getPartitionTileOffsets(
         op, op.getView(), adaptor.getView(), adaptor.getIndex(), rewriter);
 
-    if (failed(subview)) {
+    if (failed(offsets)) {
       return failure();
     }
 
     rewriter.replaceOpWithNewOp<cpu::StoreMemRefTileOp>(op, adaptor.getTile(),
-                                                        subview->getResult());
+                                                        adaptor.getView(),
+                                                        *offsets);
     return success();
   }
 };
