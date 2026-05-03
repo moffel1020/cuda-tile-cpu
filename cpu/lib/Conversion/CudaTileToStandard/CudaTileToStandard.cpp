@@ -1398,9 +1398,8 @@ struct StoreViewTkoPattern
       return failure();
     }
 
-    rewriter.replaceOpWithNewOp<cpu::StoreMemRefTileOp>(op, adaptor.getTile(),
-                                                        adaptor.getView(),
-                                                        *offsets);
+    rewriter.replaceOpWithNewOp<cpu::StoreMemRefTileOp>(
+        op, adaptor.getTile(), adaptor.getView(), *offsets);
     return success();
   }
 };
@@ -1423,6 +1422,28 @@ struct GetTileBlockIdPattern
   matchAndRewrite(cuda_tile::GetTileBlockIdOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     rewriter.replaceOpWithNewOp<cpu::GetBlockIdOp>(op);
+    return success();
+  }
+};
+
+struct AssumePattern : public OpConversionPattern<cuda_tile::AssumeOp> {
+  using OpConversionPattern<cuda_tile::AssumeOp>::OpConversionPattern;
+  LogicalResult
+  matchAndRewrite(cuda_tile::AssumeOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    // TODO: could maybe use llvm.assume?
+    rewriter.replaceOp(op, op.getValue());
+    return success();
+  }
+};
+
+struct MakeTokenPattern : public OpConversionPattern<cuda_tile::MakeTokenOp> {
+  using OpConversionPattern<cuda_tile::MakeTokenOp>::OpConversionPattern;
+  LogicalResult
+  matchAndRewrite(cuda_tile::MakeTokenOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    // the tile kernel becomes a single thread on the cpu, so just ignore tokens
+    rewriter.eraseOp(op);
     return success();
   }
 };
@@ -1466,24 +1487,24 @@ struct ConvertCudaTileToStandard
     CudaTileTypeConverter typeConverter;
 
     RewritePatternSet patterns(context);
-    patterns.add<
-        EntryPattern, ReturnPattern, ConstantPattern, IotaPattern,
-        ReshapePattern, BroadcastPattern, OffsetPattern, CatPattern,
-        ExtractPattern, PermutePattern, AddIPattern, SubIPattern, CmpIPattern,
-        ShLIPattern, ShRIPattern, MulIPattern, DivIPattern, NegIPattern,
-        MulHiIPattern, OrIPattern, XOrIPattern, AndIPattern, MaxIPattern,
-        MinIPattern, RemIPattern, AbsIPattern, FloorPattern, CeilPattern,
-        AbsFPattern, Atan2Pattern, CoshPattern, CosPattern, ExpPattern,
-        Log2Pattern, NegFPattern, SinhPattern, SinPattern, TanPattern,
-        PowPattern, AddFPattern, DivFPattern, Exp2Pattern, FmaPattern,
-        MaxFPattern, MinFPattern, RsqrtPattern, SqrtPattern, SqrtPattern,
-        TanHPattern, RemFPattern, MmaFPattern, BitcastPattern, ExtiPattern,
-        FToIPattern, FToFPattern, IToFPattern, TruncIPattern, MmaIPattern,
-        YieldPattern, IfPattern, PrintTkoPattern, LoadPtrTkoPattern,
-        StorePtrTkoPattern, MakeTensorViewPattern, MakePartitionViewPattern,
-        LoadViewTkoPattern, StoreViewTkoPattern, GetTileBlockIdPattern,
-        GetNumTileBlocksPattern, MoveOutOfCudaTileModule>(typeConverter,
-                                                          context);
+    patterns
+        .add<EntryPattern, ReturnPattern, ConstantPattern, IotaPattern,
+             ReshapePattern, BroadcastPattern, OffsetPattern, CatPattern,
+             ExtractPattern, PermutePattern, AddIPattern, SubIPattern,
+             CmpIPattern, ShLIPattern, ShRIPattern, MulIPattern, DivIPattern,
+             NegIPattern, MulHiIPattern, OrIPattern, XOrIPattern, AndIPattern,
+             MaxIPattern, MinIPattern, RemIPattern, AbsIPattern, FloorPattern,
+             CeilPattern, AbsFPattern, Atan2Pattern, CoshPattern, CosPattern,
+             ExpPattern, Log2Pattern, NegFPattern, SinhPattern, SinPattern,
+             TanPattern, PowPattern, AddFPattern, DivFPattern, Exp2Pattern,
+             FmaPattern, MaxFPattern, MinFPattern, RsqrtPattern, SqrtPattern,
+             SqrtPattern, TanHPattern, RemFPattern, MmaFPattern, BitcastPattern,
+             ExtiPattern, FToIPattern, FToFPattern, IToFPattern, TruncIPattern,
+             MmaIPattern, YieldPattern, IfPattern, PrintTkoPattern,
+             LoadPtrTkoPattern, StorePtrTkoPattern, MakeTensorViewPattern,
+             MakePartitionViewPattern, LoadViewTkoPattern, StoreViewTkoPattern,
+             MakeTokenPattern, GetTileBlockIdPattern, GetNumTileBlocksPattern,
+             AssumePattern, MoveOutOfCudaTileModule>(typeConverter, context);
 
     target.addIllegalDialect<CudaTileDialect>();
     target.addLegalDialect<
