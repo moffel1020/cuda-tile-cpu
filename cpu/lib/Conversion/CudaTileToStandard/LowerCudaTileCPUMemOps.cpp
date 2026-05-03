@@ -119,7 +119,6 @@ struct LoadPtrTilePattern : public OpConversionPattern<cpu::LoadPtrTileOp> {
   LogicalResult
   matchAndRewrite(cpu::LoadPtrTileOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-
     auto ty = op.getType();
 
     auto memTy = MemRefType::get(ty.getShape(), ty.getElementType());
@@ -369,7 +368,7 @@ struct StoreMemRefTilePattern
     auto tileType = cast<RankedTensorType>(op.getValue().getType());
 
     FailureOr<memref::SubViewOp> subview = createMemRefTileSubview(
-        op, adaptor.getDestination(), adaptor.getOffsets(), tileType, rewriter);
+        op, op.getDestination(), op.getOffsets(), tileType, rewriter);
     if (failed(subview)) {
       return failure();
     }
