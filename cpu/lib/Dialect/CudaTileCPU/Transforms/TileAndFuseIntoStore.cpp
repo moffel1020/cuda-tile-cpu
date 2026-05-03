@@ -77,6 +77,10 @@ static void fuseProducersGreedily(IRRewriter &rewriter,
   }
 }
 
+static bool shouldTileAndFuseProducersOfOp(Operation *op) {
+  return isa<cpu::StorePtrTileOp, cpu::StoreMemRefTileOp>(op);
+}
+
 struct TileAndFuseIntoStorePass
     : public cuda_tile::cpu::impl::TileAndFuseIntoStorePassBase<
           TileAndFuseIntoStorePass> {
@@ -87,35 +91,42 @@ struct TileAndFuseIntoStorePass
     mlir::ModuleOp mod = getOperation();
     IRRewriter rewriter(context);
 
-    SmallVector<cpu::StorePtrTileOp> storeOps;
-    mod.walk([&](cpu::StorePtrTileOp storeOp) { storeOps.push_back(storeOp); });
+    SmallVector<Operation *> sinkOps;
+    mod.walk([&](Operation *op) {
+      if (shouldTileAndFuseProducersOfOp(op)) {
+        sinkOps.push_back(op);
+      }
+    });
 
-    for (cpu::StorePtrTileOp storeOp : storeOps) {
-      auto tileableStore = dyn_cast<TilingInterface>(storeOp.getOperation());
-      if (!tileableStore) {
-        storeOp.emitOpError(
-            "expected store_ptr_tile to implement TilingInterface");
+    for (Operation *op : sinkOps) {
+      if (!op->getBlock()) {
+        continue;
+      }
+
+      auto tileableOp = dyn_cast<TilingInterface>(op);
+      if (!tileableOp) {
+        op->emitOpError("op does not implement TilingInterface");
         signalPassFailure();
         return;
       }
 
-      rewriter.setInsertionPoint(storeOp);
+      rewriter.setInsertionPoint(op);
       SmallVector<OpFoldResult> tileSizeOfrs =
-          getTileSizesForStore(rewriter, tileableStore, tileSizes);
+          getTileSizesForStore(rewriter, tileableOp, tileSizes);
 
       scf::SCFTilingOptions tilingOptions;
       tilingOptions.setLoopType(scf::SCFTilingOptions::LoopType::ForOp)
           .setTileSizes(tileSizeOfrs);
 
       FailureOr<scf::SCFTilingResult> tilingResult =
-          scf::tileUsingSCF(rewriter, tileableStore, tilingOptions);
+          scf::tileUsingSCF(rewriter, tileableOp, tilingOptions);
       if (failed(tilingResult)) {
-        storeOp.emitOpError("failed to tile store_ptr_tile");
+        op->emitOpError("failed to tile op");
         signalPassFailure();
         return;
       }
 
-      rewriter.eraseOp(storeOp);
+      rewriter.eraseOp(op);
       fuseProducersGreedily(rewriter, tilingResult->loops,
                             tilingResult->generatedSlices);
     }
