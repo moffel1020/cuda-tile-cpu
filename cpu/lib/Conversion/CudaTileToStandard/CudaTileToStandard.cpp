@@ -11,6 +11,7 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/IRMapping.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
 
@@ -482,6 +483,97 @@ struct SelectPattern : public OpConversionPattern<cuda_tile::SelectOp> {
                   ConversionPatternRewriter &rewriter) const override {
     rewriter.replaceOpWithNewOp<arith::SelectOp>(
         op, adaptor.getCond(), adaptor.getValIfTrue(), adaptor.getValIfFalse());
+    return success();
+  }
+};
+
+struct ReducePattern : public OpConversionPattern<cuda_tile::ReduceOp> {
+  using OpConversionPattern<cuda_tile::ReduceOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(cuda_tile::ReduceOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    SmallVector<Type> convertedResultTypes;
+    if (failed(getTypeConverter()->convertTypes(op.getResultTypes(),
+                                                convertedResultTypes))) {
+      return failure();
+    }
+
+    // create init types, inputs and outputs of linalg op should be tensors
+    SmallVector<Type> linalgResultTypes;
+    SmallVector<RankedTensorType> initTypes;
+    for (Type t : convertedResultTypes) {
+      RankedTensorType initType;
+      if (isScalarType(t)) {
+        initType = RankedTensorType::get({}, t);
+      } else {
+        initType = cast<RankedTensorType>(t);
+      }
+      initTypes.push_back(initType);
+      linalgResultTypes.push_back(initType);
+    }
+
+    // create identity constant values
+    SmallVector<Value> inits;
+    auto identities = op.getIdentities();
+    inits.reserve(identities.size());
+    for (auto [id, type] : llvm::zip(identities, initTypes)) {
+      Value identity =
+          arith::ConstantOp::create(rewriter, op.getLoc(), cast<TypedAttr>(id));
+      inits.push_back(createTensorSplat(rewriter, op.getLoc(), identity, type));
+    }
+
+    // create reduce op and convert arg types
+    auto reduceOp = linalg::ReduceOp::create(
+        rewriter, op.getLoc(), linalgResultTypes, adaptor.getOperands(),
+        inits, ArrayRef<int64_t>{static_cast<int64_t>(op.getDim())});
+
+    Region &combiner = reduceOp.getCombiner();
+    Block *combinerBlock = rewriter.createBlock(&combiner);
+
+    SmallVector<Type> blockArgTypes;
+    for (Value input : adaptor.getOperands()) {
+      auto inputType = cast<RankedTensorType>(input.getType());
+      blockArgTypes.push_back(inputType.getElementType());
+    }
+    for (RankedTensorType initType : initTypes) {
+      blockArgTypes.push_back(initType.getElementType());
+    }
+    for (Type type : blockArgTypes) {
+      combinerBlock->addArgument(type, op.getLoc());
+    }
+
+    Block &oldBlock = op.getBody().front();
+    IRMapping mapping;
+    auto numOperands = op.getNumOperands();
+    for (auto [index, oldArg] : llvm::enumerate(oldBlock.getArguments())) {
+      // in cuda tile: input and accums are interleaved
+      // in linalg: first all inputs, then all accums
+      auto newIndex = index % 2 == 0 ? index / 2 : numOperands + (index / 2);
+      mapping.map(oldArg, combinerBlock->getArgument(newIndex));
+    }
+
+    rewriter.setInsertionPointToEnd(combinerBlock);
+    for (Operation &nested : oldBlock.without_terminator()) {
+      rewriter.clone(nested, mapping);
+    }
+
+    rewriter.clone(*oldBlock.getTerminator(), mapping);
+
+    rewriter.setInsertionPointAfter(reduceOp);
+
+    SmallVector<Value> replacements;
+    for (auto [result, convertedType] :
+         llvm::zip(reduceOp.getResults(), convertedResultTypes)) {
+      if (isScalarType(convertedType)) {
+        replacements.push_back(tensor::ExtractOp::create(rewriter, op.getLoc(),
+                                                         result, ValueRange{}));
+      } else {
+        replacements.push_back(result);
+      }
+    }
+
+    rewriter.replaceOp(op, replacements);
     return success();
   }
 };
@@ -1140,6 +1232,10 @@ struct YieldPattern : public OpConversionPattern<cuda_tile::YieldOp> {
       rewriter.replaceOpWithNewOp<scf::YieldOp>(op, adaptor.getOperands());
       return success();
     }
+    if (dyn_cast<linalg::ReduceOp>(*parent)) {
+      rewriter.replaceOpWithNewOp<linalg::YieldOp>(op, adaptor.getOperands());
+      return success();
+    }
 
     return failure();
   }
@@ -1450,24 +1546,25 @@ struct ConvertCudaTileToStandard
     CudaTileTypeConverter typeConverter;
 
     RewritePatternSet patterns(context);
-    patterns.add<
-        EntryPattern, ReturnPattern, ConstantPattern, IotaPattern,
-        ReshapePattern, BroadcastPattern, OffsetPattern, CatPattern,
-        ExtractPattern, PermutePattern, SelectPattern, AddIPattern, SubIPattern,
-        CmpIPattern, ShLIPattern, ShRIPattern, MulIPattern, DivIPattern,
-        NegIPattern, MulHiIPattern, OrIPattern, XOrIPattern, AndIPattern,
-        MaxIPattern, MinIPattern, RemIPattern, AbsIPattern, FloorPattern,
-        CeilPattern, AbsFPattern, Atan2Pattern, CoshPattern, CosPattern,
-        ExpPattern, Log2Pattern, NegFPattern, SinhPattern, SinPattern,
-        TanPattern, PowPattern, AddFPattern, DivFPattern, Exp2Pattern,
-        FmaPattern, MaxFPattern, MinFPattern, RsqrtPattern, SqrtPattern,
-        SqrtPattern, TanHPattern, RemFPattern, MmaFPattern, BitcastPattern,
-        ExtiPattern, FToIPattern, FToFPattern, IToFPattern, TruncIPattern,
-        MmaIPattern, YieldPattern, IfPattern, PrintTkoPattern,
-        LoadPtrTkoPattern, StorePtrTkoPattern, MakeTensorViewPattern,
-        MakePartitionViewPattern, LoadViewTkoPattern, StoreViewTkoPattern,
-        MakeTokenPattern, GetTileBlockIdPattern, GetNumTileBlocksPattern,
-        AssumePattern, MoveOutOfCudaTileModule>(typeConverter, context);
+    patterns
+        .add<EntryPattern, ReturnPattern, ConstantPattern, IotaPattern,
+             ReshapePattern, BroadcastPattern, OffsetPattern, CatPattern,
+             ExtractPattern, PermutePattern, SelectPattern, ReducePattern,
+             AddIPattern, SubIPattern, CmpIPattern, ShLIPattern, ShRIPattern,
+             MulIPattern, DivIPattern, NegIPattern, MulHiIPattern, OrIPattern,
+             XOrIPattern, AndIPattern, MaxIPattern, MinIPattern, RemIPattern,
+             AbsIPattern, FloorPattern, CeilPattern, AbsFPattern, Atan2Pattern,
+             CoshPattern, CosPattern, ExpPattern, Log2Pattern, NegFPattern,
+             SinhPattern, SinPattern, TanPattern, PowPattern, AddFPattern,
+             DivFPattern, Exp2Pattern, FmaPattern, MaxFPattern, MinFPattern,
+             RsqrtPattern, SqrtPattern, SqrtPattern, TanHPattern, RemFPattern,
+             MmaFPattern, BitcastPattern, ExtiPattern, FToIPattern, FToFPattern,
+             IToFPattern, TruncIPattern, MmaIPattern, YieldPattern, IfPattern,
+             PrintTkoPattern, LoadPtrTkoPattern, StorePtrTkoPattern,
+             MakeTensorViewPattern, MakePartitionViewPattern,
+             LoadViewTkoPattern, StoreViewTkoPattern, MakeTokenPattern,
+             GetTileBlockIdPattern, GetNumTileBlocksPattern, AssumePattern,
+             MoveOutOfCudaTileModule>(typeConverter, context);
 
     target.addIllegalDialect<CudaTileDialect>();
     target.addLegalDialect<
