@@ -38,9 +38,8 @@ public:
   CudaTileTypeConverter() {
     addConversion([](Type type) { return type; });
 
-    addConversion([&](cuda_tile::TileType type) -> Type {
-      return convertTileToTensor(type);
-    });
+    addConversion(
+        [&](cuda_tile::TileType type) -> Type { return convertTile(type); });
 
     addConversion([&](cuda_tile::TensorViewType type) -> Type {
       return convertTensorViewToMemRef(type);
@@ -52,11 +51,15 @@ public:
   }
 
 private:
-  Type convertTileToTensor(cuda_tile::TileType type) const {
+  Type convertTile(cuda_tile::TileType type) const {
     auto shape = type.getShape();
     Type elemTy = type.getElementType();
     if (auto ptrType = dyn_cast<cuda_tile::PointerType>(elemTy)) {
       elemTy = convertCudaTilePtr(ptrType);
+    }
+    if (shape.empty()) {
+      // convert to scalar
+      return elemTy;
     }
     return RankedTensorType::get(shape, elemTy);
   }
@@ -115,13 +118,48 @@ convertOverflowFlags(cuda_tile::IntegerOverflow of) {
   }
 }
 
+static bool isScalarType(Type type) { return !isa<ShapedType>(type); }
+
+static bool isScalarValue(Value value) {
+  return value && isScalarType(value.getType());
+}
+
+static Value createTensorSplat(OpBuilder &builder, Location loc, Value scalar,
+                               RankedTensorType resultType) {
+  auto empty = tensor::EmptyOp::create(builder, loc, resultType.getShape(),
+                                       resultType.getElementType());
+  return linalg::FillOp::create(builder, loc, ValueRange{scalar},
+                                ValueRange{empty})
+      .getResult(0);
+}
+
+static Value extractScalarTensor(Location loc, Value value,
+                                 OpBuilder &rewriter) {
+  if (auto tensorType = dyn_cast<RankedTensorType>(value.getType())) {
+    if (tensorType.getRank() == 0) {
+      return tensor::ExtractOp::create(rewriter, loc, value, ValueRange{});
+    }
+  }
+  return value;
+}
+
+static Value extractScalarTensorAsIndex(Location loc, Value value,
+                                        OpBuilder &rewriter) {
+  value = extractScalarTensor(loc, value, rewriter);
+  if (isa<IndexType>(value.getType())) {
+    return value;
+  }
+  return arith::IndexCastUIOp::create(rewriter, loc, rewriter.getIndexType(),
+                                      value);
+}
+
 struct EntryPattern : public OpConversionPattern<cuda_tile::EntryOp> {
   using OpConversionPattern<cuda_tile::EntryOp>::OpConversionPattern;
 
   LogicalResult
   matchAndRewrite(cuda_tile::EntryOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-
+    // arg types are converted by marking signature dynamically legal
     auto func = func::FuncOp::create(rewriter, op.getLoc(), op.getName(),
                                      op.getFunctionType());
     rewriter.inlineRegionBefore(op.getRegion(), func.getBody(), func.end());
@@ -156,14 +194,20 @@ struct ConstantPattern : public OpConversionPattern<cuda_tile::ConstantOp> {
                   ConversionPatternRewriter &rewriter) const override {
 
     auto oldType = op.getType();
-    auto tensorType =
-        RankedTensorType::get(oldType.getShape(), oldType.getElementType());
-
     auto oldAttr = dyn_cast<DenseElementsAttr>(op.getValueAttr());
     if (!oldAttr) {
       return failure();
     }
 
+    if (oldType.getShape().empty()) {
+      auto scalarAttr = cast<TypedAttr>(oldAttr.getValues<Attribute>()[0]);
+      rewriter.replaceOpWithNewOp<arith::ConstantOp>(
+          op, oldType.getElementType(), scalarAttr);
+      return success();
+    }
+
+    auto tensorType =
+        RankedTensorType::get(oldType.getShape(), oldType.getElementType());
     auto newAttr = oldAttr.reshape(tensorType);
     rewriter.replaceOpWithNewOp<arith::ConstantOp>(op, tensorType, newAttr);
 
@@ -215,7 +259,8 @@ struct OffsetPattern : public OpConversionPattern<cuda_tile::OffsetOp> {
     auto ptrTy = op.getPtr().getType().getElementType();
     auto pointeeTy = cast<PointerType>(ptrTy).getPointeeType();
     auto bitWidth = pointeeTy.getIntOrFloatBitWidth();
-    // the spec says just multiply by bitwidth here but that seems wrong
+    // the spec says multiply by bitwidth here but that seems wrong
+    // byte count is more logical
     auto offWidth = op.getOffset().getType().getElementTypeBitWidth();
     auto widthConst =
         arith::ConstantIntOp::create(rewriter, op.getLoc(), bitWidth / 8, 64);
@@ -227,19 +272,31 @@ struct OffsetPattern : public OpConversionPattern<cuda_tile::OffsetOp> {
     auto flags =
         arith::IntegerOverflowFlags::nsw | arith::IntegerOverflowFlags::nuw;
 
+    auto createOffsetValue = [&](OpBuilder &b, Location loc, Value ptrElem,
+                                 Value offElem) -> Value {
+      if (offWidth != 64) {
+        offElem = arith::ExtUIOp::create(b, loc, rewriter.getI64Type(), offElem,
+                                         true);
+      }
+      auto mulOp = arith::MulIOp::create(b, loc, offElem, widthConst, flags);
+      return arith::AddIOp::create(b, loc, ptrElem, mulOp, flags);
+    };
+
+    auto resultType = getTypeConverter()->convertType(op.getType());
+    if (isScalarType(resultType)) {
+      rewriter.replaceOp(op, createOffsetValue(rewriter, op.getLoc(),
+                                               adaptor.getPtr(),
+                                               adaptor.getOffset()));
+      return success();
+    }
+
     auto newOp = linalg::MapOp::create(
         rewriter, op.getLoc(), {adaptor.getPtr(), adaptor.getOffset()}, empty,
         [&](OpBuilder &b, Location loc, ValueRange args) {
           auto ptrElem = args[0];
           auto offElem = args[1];
-          if (offWidth != 64) {
-            offElem = arith::ExtUIOp::create(b, loc, rewriter.getI64Type(),
-                                             offElem, true);
-          }
-          auto mulOp =
-              arith::MulIOp::create(b, loc, offElem, widthConst, flags);
-          Value addOp = arith::AddIOp::create(b, loc, ptrElem, mulOp, flags);
-          linalg::YieldOp::create(b, loc, addOp);
+          linalg::YieldOp::create(b, loc,
+                                  createOffsetValue(b, loc, ptrElem, offElem));
         });
 
     rewriter.replaceOp(op, newOp);
@@ -256,6 +313,13 @@ struct BroadcastPattern : public OpConversionPattern<cuda_tile::BroadcastOp> {
 
     auto opTy = op.getType();
     auto rank = opTy.getRank();
+    auto newTy = cast<RankedTensorType>(getTypeConverter()->convertType(opTy));
+
+    if (isScalarValue(adaptor.getSource())) {
+      rewriter.replaceOp(op, createTensorSplat(rewriter, op.getLoc(),
+                                               adaptor.getSource(), newTy));
+      return success();
+    }
 
     AffineMap inputMap =
         getBroadcastInputMap(op.getSource().getType().getShape(),
@@ -263,7 +327,6 @@ struct BroadcastPattern : public OpConversionPattern<cuda_tile::BroadcastOp> {
     AffineMap outputMap = AffineMap::getMultiDimIdentityMap(
         opTy.getRank(), rewriter.getContext());
 
-    auto newTy = cast<RankedTensorType>(getTypeConverter()->convertType(opTy));
     SmallVector<utils::IteratorType> iterators(rank,
                                                utils::IteratorType::parallel);
 
@@ -303,8 +366,22 @@ struct ReshapePattern : public OpConversionPattern<cuda_tile::ReshapeOp> {
   LogicalResult
   matchAndRewrite(cuda_tile::ReshapeOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    auto tensorType =
-        cast<RankedTensorType>(getTypeConverter()->convertType(op.getType()));
+    Type resultType = getTypeConverter()->convertType(op.getType());
+    Value source = adaptor.getSource();
+
+    if (isScalarType(resultType)) {
+      rewriter.replaceOp(op,
+                         extractScalarTensor(op.getLoc(), source, rewriter));
+      return success();
+    }
+
+    auto tensorType = cast<RankedTensorType>(resultType);
+    if (isScalarValue(source)) {
+      auto elemOp = tensor::FromElementsOp::create(rewriter, op.getLoc(),
+                                                   resultType, source);
+      rewriter.replaceOp(op, elemOp);
+      return success();
+    }
 
     auto shapeType =
         RankedTensorType::get({tensorType.getRank()}, rewriter.getIndexType());
@@ -315,8 +392,8 @@ struct ReshapePattern : public OpConversionPattern<cuda_tile::ReshapeOp> {
 
     auto attr = DenseElementsAttr::get(shapeType, values);
     auto shape = arith::ConstantOp::create(rewriter, op.getLoc(), attr);
-    rewriter.replaceOpWithNewOp<tensor::ReshapeOp>(op, tensorType,
-                                                   adaptor.getSource(), shape);
+    rewriter.replaceOpWithNewOp<tensor::ReshapeOp>(op, tensorType, source,
+                                                   shape);
     return success();
   }
 };
@@ -337,22 +414,30 @@ struct ExtractPattern : public OpConversionPattern<cuda_tile::ExtractOp> {
   LogicalResult
   matchAndRewrite(cuda_tile::ExtractOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    auto resType =
-        cast<TensorType>(getTypeConverter()->convertType(op.getResult()));
+    Type convertedResultType =
+        getTypeConverter()->convertType(op.getResult().getType());
+
+    if (isScalarType(convertedResultType)) {
+      SmallVector<Value> indices =
+          llvm::map_to_vector(adaptor.getIndices(), [&](auto idx) {
+            return extractScalarTensorAsIndex(op.getLoc(), idx, rewriter);
+          });
+      rewriter.replaceOpWithNewOp<tensor::ExtractOp>(op, adaptor.getSource(),
+                                                     indices);
+      return success();
+    }
+
+    auto resType = cast<TensorType>(convertedResultType);
     auto resShape = resType.getShape();
     SmallVector<int64_t> staticStrides(resType.getRank(), 1);
     SmallVector<int64_t> staticOffsets(resType.getRank(), ShapedType::kDynamic);
 
     SmallVector<Value> offsets;
     for (auto [size, idx] : llvm::zip(resShape, adaptor.getIndices())) {
-      auto shapeSizeOp =
-          arith::ConstantIndexOp::create(rewriter, op.getLoc(), /*value=*/size);
-      // TODO: check if this unpack is optimized away, if not try creating
-      // scalar constants and then doing tensor.from_elements for other users
-      auto unpackedIdx =
-          tensor::ExtractOp::create(rewriter, op.getLoc(), idx, {});
-      auto castedUnpackedIdx = arith::IndexCastUIOp::create(
-          rewriter, op.getLoc(), IndexType::get(getContext()), unpackedIdx);
+      auto shapeSizeOp = arith::ConstantIndexOp::create(rewriter, op.getLoc(),
+                                                        /*value=*/size);
+      auto castedUnpackedIdx =
+          extractScalarTensorAsIndex(op.getLoc(), idx, rewriter);
 
       offsets.emplace_back(arith::MulIOp::create(
           rewriter, op.getLoc(), shapeSizeOp, castedUnpackedIdx));
@@ -395,52 +480,21 @@ struct SelectPattern : public OpConversionPattern<cuda_tile::SelectOp> {
   LogicalResult
   matchAndRewrite(cuda_tile::SelectOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    auto opTy = op.getType();
-    auto empty = tensor::EmptyOp::create(rewriter, op.getLoc(), opTy.getShape(),
-                                         opTy.getElementType());
-    auto newOp = linalg::SelectOp::create(rewriter, op.getLoc(),
-                                          adaptor.getOperands(), {empty});
+    rewriter.replaceOpWithNewOp<arith::SelectOp>(
+        op, adaptor.getCond(), adaptor.getValIfTrue(), adaptor.getValIfFalse());
+    return success();
+  }
+};
+
+template <typename T, typename U>
+struct ConvertElementwise : public OpConversionPattern<T> {
+  using OpConversionPattern<T>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(T op, typename T::Adaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto newOp = U::create(rewriter, op.getLoc(), adaptor.getOperands());
     rewriter.replaceOp(op, newOp);
-    return success();
-  }
-};
-
-template <typename T, typename U>
-struct ConvertWithMap : public OpConversionPattern<T> {
-  using OpConversionPattern<T>::OpConversionPattern;
-
-  LogicalResult
-  matchAndRewrite(T op, typename T::Adaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
-
-    auto opTy = op.getType();
-    auto empty = tensor::EmptyOp::create(rewriter, op.getLoc(), opTy.getShape(),
-                                         opTy.getElementType());
-
-    auto mapOp = linalg::MapOp::create(
-        rewriter, op.getLoc(), adaptor.getOperands(), empty,
-        [](OpBuilder &b, Location loc, ValueRange args) {
-          auto newOp = U::create(b, loc, args.drop_back());
-          linalg::YieldOp::create(b, loc, newOp.getResult());
-        });
-
-    rewriter.replaceOp(op, mapOp);
-    return success();
-  }
-};
-
-template <typename T, typename U>
-struct ReplaceWithLinalg : public OpConversionPattern<T> {
-  using OpConversionPattern<T>::OpConversionPattern;
-
-  LogicalResult
-  matchAndRewrite(T op, typename T::Adaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
-    auto opTy = op.getType();
-    auto empty = tensor::EmptyOp::create(rewriter, op.getLoc(), opTy.getShape(),
-                                         opTy.getElementType());
-    rewriter.replaceOpWithNewOp<U>(op, adaptor.getOperands(),
-                                   empty.getResult());
     return success();
   }
 };
@@ -452,33 +506,19 @@ struct MaxIMinIPattern : public OpConversionPattern<T> {
   LogicalResult
   matchAndRewrite(T op, typename T::Adaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-
     auto signedness = op.getSignedness();
-    auto opTy = op.getType();
-    auto empty = tensor::EmptyOp::create(rewriter, op.getLoc(), opTy.getShape(),
-                                         opTy.getElementType());
-
-    auto newOp = [&]() -> Operation * {
-      switch (signedness) {
-      case Signedness::Unsigned:
-        return linalg::MapOp::create(
-            rewriter, op.getLoc(), adaptor.getOperands(), empty,
-            [](OpBuilder &b, Location loc, ValueRange args) {
-              Value mapOp = UnsignedMapOp::create(b, loc, args.drop_back());
-              linalg::YieldOp::create(b, loc, mapOp);
-            });
-      case Signedness::Signed:
-        return SignedOp::create(rewriter, op.getLoc(),
-                                ValueRange{adaptor.getLhs(), adaptor.getRhs()},
-                                ValueRange{empty});
-      default:
-        llvm_unreachable(
-            "only unsigned and signed are valid"); // suppress warning because
-                                                   // of templated class
-      }
-    }();
-
-    rewriter.replaceOp(op, newOp);
+    switch (signedness) {
+    case Signedness::Unsigned:
+      rewriter.replaceOpWithNewOp<UnsignedMapOp>(op, adaptor.getLhs(),
+                                                 adaptor.getRhs());
+      return success();
+    case Signedness::Signed:
+      rewriter.replaceOpWithNewOp<SignedOp>(op, adaptor.getLhs(),
+                                            adaptor.getRhs());
+      return success();
+    default:
+      llvm_unreachable("only unsigned and signed are valid");
+    }
     return success();
   }
 };
@@ -490,20 +530,12 @@ struct MaxFMinFPattern : public OpConversionPattern<T> {
   LogicalResult
   matchAndRewrite(T op, typename T::Adaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    auto opTy = op.getType();
-    auto empty = tensor::EmptyOp::create(rewriter, op.getLoc(), opTy.getShape(),
-                                         opTy.getElementType());
-
     if (op.getPropagateNan()) {
-      rewriter.replaceOpWithNewOp<PropOp>(op, adaptor.getOperands(),
-                                          ValueRange{empty});
+      rewriter.replaceOpWithNewOp<PropOp>(op, adaptor.getLhs(),
+                                          adaptor.getRhs());
     } else {
-      rewriter.replaceOpWithNewOp<linalg::MapOp>(
-          op, adaptor.getOperands(), empty,
-          [](OpBuilder &b, Location loc, ValueRange args) {
-            Value mapOp = NoPropOp::create(b, loc, args.drop_back());
-            linalg::YieldOp::create(b, loc, mapOp);
-          });
+      rewriter.replaceOpWithNewOp<NoPropOp>(op, adaptor.getLhs(),
+                                            adaptor.getRhs());
     }
 
     return success();
@@ -518,34 +550,18 @@ struct SignedUnsignedPattern : public OpConversionPattern<T> {
   matchAndRewrite(T op, typename T::Adaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     auto signedness = op.getSignedness();
-    auto opTy = op.getType();
-    auto empty = tensor::EmptyOp::create(rewriter, op.getLoc(), opTy.getShape(),
-                                         opTy.getElementType());
-
-    auto newOp = [&]() -> Operation * {
-      switch (signedness) {
-      case Signedness::Unsigned:
-        return linalg::MapOp::create(
-            rewriter, op.getLoc(), adaptor.getOperands(), empty,
-            [](OpBuilder &b, Location loc, ValueRange args) {
-              Value mapOp = UnsignedOp::create(b, loc, args.drop_back());
-              linalg::YieldOp::create(b, loc, mapOp);
-            });
-      case Signedness::Signed:
-        return linalg::MapOp::create(
-            rewriter, op.getLoc(), adaptor.getOperands(), empty,
-            [](OpBuilder &b, Location loc, ValueRange args) {
-              Value mapOp = SignedOp::create(b, loc, args.drop_back());
-              linalg::YieldOp::create(b, loc, mapOp);
-            });
-      default:
-        llvm_unreachable(
-            "only unsigned and signed are valid"); // suppress warning because
-                                                   // of templated class
-      }
-    }();
-
-    rewriter.replaceOp(op, newOp);
+    switch (signedness) {
+    case Signedness::Unsigned:
+      rewriter.replaceOpWithNewOp<UnsignedOp>(op, adaptor.getLhs(),
+                                              adaptor.getRhs());
+      return success();
+    case Signedness::Signed:
+      rewriter.replaceOpWithNewOp<SignedOp>(op, adaptor.getLhs(),
+                                            adaptor.getRhs());
+      return success();
+    default:
+      llvm_unreachable("only unsigned and signed are valid");
+    }
     return success();
   }
 };
@@ -581,19 +597,8 @@ struct CmpIPattern : public OpConversionPattern<cuda_tile::CmpIOp> {
       }
     }();
 
-    auto opTy = op.getType();
-    auto boolType = IntegerType::get(getContext(), 1);
-    auto empty = tensor::EmptyOp::create(rewriter, op.getLoc(), opTy.getShape(),
-                                         boolType);
-
-    rewriter.replaceOpWithNewOp<linalg::MapOp>(
-        op, adaptor.getOperands(), empty,
-        [&](OpBuilder &b, Location loc, ValueRange args) {
-          Value newOp = arith::CmpIOp::create(b, loc, boolType, cmpPred,
-                                              args[0], args[1]);
-          linalg::YieldOp::create(b, loc, newOp);
-        });
-
+    rewriter.replaceOpWithNewOp<arith::CmpIOp>(op, cmpPred, adaptor.getLhs(),
+                                               adaptor.getRhs());
     return success();
   }
 };
@@ -605,30 +610,28 @@ struct DivIPattern : public OpConversionPattern<cuda_tile::DivIOp> {
   matchAndRewrite(DivIOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     auto sign = op.getSignedness();
-    auto opTy = op.getType();
-    auto empty = tensor::EmptyOp::create(rewriter, op.getLoc(), opTy.getShape(),
-                                         opTy.getElementType());
-
-    CreateMapOp createMap{rewriter, op.getLoc(), adaptor.getOperands(), empty};
-
     auto newOp = [&]() -> Operation * {
       using S = cuda_tile::Signedness;
       using RM = cuda_tile::RoundingMode;
 
       switch (op.getRounding()) {
       case RM::NEGATIVE_INF:
-        return createMap.withOp<arith::FloorDivSIOp>();
+        return arith::FloorDivSIOp::create(rewriter, op.getLoc(),
+                                           adaptor.getLhs(), adaptor.getRhs());
       case RM::POSITIVE_INF:
-        return sign == S::Signed ? createMap.withOp<arith::CeilDivSIOp>()
-                                 : createMap.withOp<arith::CeilDivUIOp>();
+        return sign == S::Signed
+                   ? arith::CeilDivSIOp::create(rewriter, op.getLoc(),
+                                                adaptor.getLhs(),
+                                                adaptor.getRhs())
+                   : arith::CeilDivUIOp::create(rewriter, op.getLoc(),
+                                                adaptor.getLhs(),
+                                                adaptor.getRhs());
       case RM::ZERO:
         return sign == S::Signed
-                   ? linalg::DivOp::create(rewriter, op.getLoc(),
-                                           adaptor.getOperands(),
-                                           ValueRange{empty})
-                   : linalg::DivUnsignedOp::create(rewriter, op.getLoc(),
-                                                   adaptor.getOperands(),
-                                                   ValueRange{empty});
+                   ? arith::DivSIOp::create(rewriter, op.getLoc(),
+                                            adaptor.getLhs(), adaptor.getRhs())
+                   : arith::DivUIOp::create(rewriter, op.getLoc(),
+                                            adaptor.getLhs(), adaptor.getRhs());
       default:
         return nullptr;
       }
@@ -644,24 +647,6 @@ struct DivIPattern : public OpConversionPattern<cuda_tile::DivIOp> {
     rewriter.replaceOp(op, newOp);
     return success();
   }
-
-private:
-  struct CreateMapOp {
-    template <typename T>
-    Operation *withOp() {
-      return linalg::MapOp::create(
-          rewriter, loc, args, init,
-          [](OpBuilder &b, Location loc, ValueRange args) {
-            Value val = T::create(b, loc, args.drop_back());
-            linalg::YieldOp::create(b, loc, val);
-          });
-    }
-
-    ConversionPatternRewriter &rewriter;
-    Location loc;
-    ValueRange args;
-    Value init;
-  };
 };
 
 struct NegIPattern : public OpConversionPattern<cuda_tile::NegIOp> {
@@ -670,21 +655,15 @@ struct NegIPattern : public OpConversionPattern<cuda_tile::NegIOp> {
   LogicalResult matchAndRewrite(cuda_tile::NegIOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) {
 
-    auto elemTy = op.getType().getElementType();
-    auto c0 = arith::ConstantIntOp::create(rewriter, op.getLoc(), elemTy, 0);
-
-    auto opTy = op.getType();
-    auto empty = tensor::EmptyOp::create(rewriter, op.getLoc(), opTy.getShape(),
-                                         opTy.getElementType());
-
-    rewriter.replaceOpWithNewOp<linalg::MapOp>(
-        op, adaptor.getOperands(), empty,
-        [&](OpBuilder &b, Location loc, ValueRange args) {
-          Value subOp = arith::SubIOp::create(
-              b, loc, args[0], c0, convertOverflowFlags(op.getOverflow()));
-          linalg::YieldOp::create(b, loc, subOp);
-        });
-
+    Type resultType = getTypeConverter()->convertType(op.getType());
+    Type elemTy = getElementTypeOrSelf(resultType);
+    Value c0 = arith::ConstantIntOp::create(rewriter, op.getLoc(), elemTy, 0);
+    if (!isScalarType(resultType)) {
+      c0 = createTensorSplat(rewriter, op.getLoc(), c0,
+                             cast<RankedTensorType>(resultType));
+    }
+    rewriter.replaceOpWithNewOp<arith::SubIOp>(
+        op, c0, adaptor.getSource(), convertOverflowFlags(op.getOverflow()));
     return success();
   }
 };
@@ -697,34 +676,20 @@ struct MulHiIPattern : public OpConversionPattern<cuda_tile::MulhiIOp> {
     // TODO optimization: if lower halve is also calculated with a regular mul
     // op, remove it and just use the lower result of this op
 
-    auto opTy = op.getType();
-    auto empty = tensor::EmptyOp::create(rewriter, op.getLoc(), opTy.getShape(),
-                                         opTy.getElementType());
     // according to the spec, this op is only defined for unsigned integers
-    rewriter.replaceOpWithNewOp<linalg::MapOp>(
-        op, adaptor.getOperands(), empty,
-        [&](OpBuilder &b, Location loc, ValueRange args) {
-          auto mulOp = arith::MulUIExtendedOp::create(b, loc, args[0], args[1]);
-          linalg::YieldOp::create(b, loc, mulOp.getHigh());
-        });
-
+    auto mulOp = arith::MulUIExtendedOp::create(rewriter, op.getLoc(),
+                                                adaptor.getX(), adaptor.getY());
+    rewriter.replaceOp(op, mulOp.getHigh());
     return success();
   }
 };
 
 template <typename T, typename U>
-static Operation *createConversionMapOp(T op, typename T::Adaptor adaptor,
-                                        ConversionPatternRewriter &rewriter) {
-  auto opTy = op.getType();
-  auto empty = tensor::EmptyOp::create(rewriter, op.getLoc(), opTy.getShape(),
-                                       opTy.getElementType());
-  return linalg::MapOp::create(
-      rewriter, op.getLoc(), adaptor.getOperands(), empty,
-      [&](OpBuilder &b, Location loc, ValueRange args) {
-        Value extOp =
-            U::create(b, loc, empty.getType().getElementType(), args[0]);
-        linalg::YieldOp::create(b, loc, extOp);
-      });
+static Value createConversionOp(T op, typename T::Adaptor adaptor,
+                                const TypeConverter *typeConverter,
+                                ConversionPatternRewriter &rewriter) {
+  Type resultType = typeConverter->convertType(op.getType());
+  return U::create(rewriter, op.getLoc(), resultType, adaptor.getOperands()[0]);
 }
 
 struct BitcastPattern : public OpConversionPattern<cuda_tile::BitcastOp> {
@@ -732,8 +697,9 @@ struct BitcastPattern : public OpConversionPattern<cuda_tile::BitcastOp> {
   LogicalResult
   matchAndRewrite(cuda_tile::BitcastOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    auto newOp = createConversionMapOp<cuda_tile::BitcastOp, arith::BitcastOp>(
-        op, adaptor, rewriter);
+    auto newOp = createConversionOp<cuda_tile::BitcastOp, arith::BitcastOp>(
+        op, adaptor, getTypeConverter(), rewriter);
+    rewriter.replaceOp(op, newOp);
     return success();
   }
 };
@@ -744,14 +710,13 @@ struct ExtiPattern : public OpConversionPattern<cuda_tile::ExtIOp> {
   LogicalResult
   matchAndRewrite(cuda_tile::ExtIOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-
     auto newOp = [&] {
       if (op.getSignedness() == Signedness::Signed) {
-        return createConversionMapOp<cuda_tile::ExtIOp, arith::ExtSIOp>(
-            op, adaptor, rewriter);
+        return createConversionOp<cuda_tile::ExtIOp, arith::ExtSIOp>(
+            op, adaptor, getTypeConverter(), rewriter);
       } else {
-        return createConversionMapOp<cuda_tile::ExtIOp, arith::ExtUIOp>(
-            op, adaptor, rewriter);
+        return createConversionOp<cuda_tile::ExtIOp, arith::ExtUIOp>(
+            op, adaptor, getTypeConverter(), rewriter);
       }
     }();
 
@@ -766,7 +731,6 @@ struct FToIPattern : public OpConversionPattern<cuda_tile::FToIOp> {
   LogicalResult
   matchAndRewrite(cuda_tile::FToIOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-
     if (op.getRoundingMode() != cuda_tile::RoundingMode::NEAREST_INT_TO_ZERO) {
       return rewriter.notifyMatchFailure(
           op, "as of cuda tile 13.2, only nearest_int_to_zero is a supported "
@@ -775,11 +739,11 @@ struct FToIPattern : public OpConversionPattern<cuda_tile::FToIOp> {
 
     auto newOp = [&] {
       if (op.getSignedness() == Signedness::Signed) {
-        return createConversionMapOp<cuda_tile::FToIOp, arith::FPToSIOp>(
-            op, adaptor, rewriter);
+        return createConversionOp<cuda_tile::FToIOp, arith::FPToSIOp>(
+            op, adaptor, getTypeConverter(), rewriter);
       } else {
-        return createConversionMapOp<cuda_tile::FToIOp, arith::FPToUIOp>(
-            op, adaptor, rewriter);
+        return createConversionOp<cuda_tile::FToIOp, arith::FPToUIOp>(
+            op, adaptor, getTypeConverter(), rewriter);
       }
     }();
 
@@ -794,7 +758,6 @@ struct FToFPattern : public OpConversionPattern<cuda_tile::FToFOp> {
   LogicalResult
   matchAndRewrite(cuda_tile::FToFOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-
     if (op.getRoundingMode() != cuda_tile::RoundingMode::NEAREST_INT_TO_ZERO) {
       return rewriter.notifyMatchFailure(
           op, "as of cuda tile 13.2, only nearest_int_to_zero is a supported "
@@ -808,38 +771,29 @@ struct FToFPattern : public OpConversionPattern<cuda_tile::FToFOp> {
     auto toWidth = toType.getIntOrFloatBitWidth();
 
     if (fromWidth == toWidth) {
-      // TODO: update llvm version and use arith.convertf here, for bf16 to f16
+      // TODO: update llvm version and use arith.convertf here for bf16 to f16
       return rewriter.notifyMatchFailure(
           op, "unsupported float to float conversion");
     }
 
     auto roundingMode = convertRoundingMode(op.getRoundingMode());
 
-    auto opTy = op.getType();
-    auto empty = tensor::EmptyOp::create(rewriter, op.getLoc(), opTy.getShape(),
-                                         opTy.getElementType());
+    Type resultType = getTypeConverter()->convertType(op.getType());
     auto newOp = [&] {
       if (fromWidth > toWidth) {
-        return linalg::MapOp::create(
-            rewriter, op.getLoc(), adaptor.getFrom(), empty,
-            [&](OpBuilder &b, Location loc, ValueRange args) {
-              Value extOp = arith::ExtFOp::create(b, loc, toType, args[0]);
-              linalg::YieldOp::create(b, loc, extOp);
-            });
+        return arith::ExtFOp::create(rewriter, op.getLoc(), resultType,
+                                     adaptor.getFrom())
+            .getOperation();
       } else /* if (fromWidth < toWidth) */ {
-        return linalg::MapOp::create(
-            rewriter, op.getLoc(), adaptor.getFrom(), empty,
-            [&](OpBuilder &b, Location loc, ValueRange args) {
-              Value truncOp =
-                  !roundingMode
-                      ? arith::TruncFOp::create(b, loc, toType, args[0])
-                      : arith::TruncFOp::create(
-                            b, loc, toType, args[0],
-                            arith::RoundingModeAttr::get(getContext(),
-                                                         roundingMode.value()),
-                            {});
-              linalg::YieldOp::create(b, loc, truncOp);
-            });
+        return (!roundingMode
+                    ? arith::TruncFOp::create(rewriter, op.getLoc(), resultType,
+                                              adaptor.getFrom())
+                    : arith::TruncFOp::create(
+                          rewriter, op.getLoc(), resultType, adaptor.getFrom(),
+                          arith::RoundingModeAttr::get(getContext(),
+                                                       roundingMode.value()),
+                          {}))
+            .getOperation();
       }
     }();
 
@@ -862,11 +816,11 @@ struct IToFPattern : public OpConversionPattern<cuda_tile::IToFOp> {
     auto sign = op.getSignedness();
     auto newOp = [&] {
       if (sign == Signedness::Signed) {
-        return createConversionMapOp<cuda_tile::IToFOp, arith::SIToFPOp>(
-            op, adaptor, rewriter);
+        return createConversionOp<cuda_tile::IToFOp, arith::SIToFPOp>(
+            op, adaptor, getTypeConverter(), rewriter);
       } else {
-        return createConversionMapOp<cuda_tile::IToFOp, arith::UIToFPOp>(
-            op, adaptor, rewriter);
+        return createConversionOp<cuda_tile::IToFOp, arith::UIToFPOp>(
+            op, adaptor, getTypeConverter(), rewriter);
       }
     }();
 
@@ -881,18 +835,10 @@ struct TruncIPattern : public OpConversionPattern<cuda_tile::TruncIOp> {
   LogicalResult
   matchAndRewrite(cuda_tile::TruncIOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    auto opTy = op.getType();
-    auto empty = tensor::EmptyOp::create(rewriter, op.getLoc(), opTy.getShape(),
-                                         opTy.getElementType());
-
-    rewriter.replaceOpWithNewOp<linalg::MapOp>(
-        op, adaptor.getFrom(), empty,
-        [&](OpBuilder &b, Location loc, ValueRange args) {
-          Value truncOp =
-              arith::TruncIOp::create(b, loc, opTy.getElementType(), args[0],
-                                      convertOverflowFlags(op.getOverflow()));
-          linalg::YieldOp::create(b, loc, truncOp);
-        });
+    Type resultType = getTypeConverter()->convertType(op.getType());
+    rewriter.replaceOpWithNewOp<arith::TruncIOp>(
+        op, resultType, adaptor.getFrom(),
+        convertOverflowFlags(op.getOverflow()));
 
     return success();
   }
@@ -930,16 +876,8 @@ struct CmpFPattern : public OpConversionPattern<cuda_tile::CmpFOp> {
       }
     }();
 
-    auto opTy = op.getType();
-    auto empty = tensor::EmptyOp::create(rewriter, op.getLoc(), opTy.getShape(),
-                                         opTy.getElementType());
-    rewriter.replaceOpWithNewOp<linalg::MapOp>(
-        op, adaptor.getOperands(), empty,
-        [&](OpBuilder &b, Location loc, ValueRange args) {
-          Value cmp =
-              arith::CmpFOp::create(b, loc, arithPred, args[0], args[1]);
-          linalg::YieldOp::create(b, loc, cmp);
-        });
+    rewriter.replaceOpWithNewOp<arith::CmpFOp>(op, arithPred, adaptor.getLhs(),
+                                               adaptor.getRhs());
 
     return success();
   }
@@ -951,6 +889,12 @@ struct MmaIPattern : public OpConversionPattern<cuda_tile::MmaIOp> {
   matchAndRewrite(cuda_tile::MmaIOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     // lhs and rhs must be i8 and acc must be i32 according to spec
+
+    if (isScalarValue(adaptor.getAcc()) || isScalarValue(adaptor.getLhs()) ||
+        isScalarValue(adaptor.getRhs())) {
+      return rewriter.notifyMatchFailure(
+          op, "converted matmul ops should be tensors");
+    }
 
     auto extendIn = [&](auto val, cuda_tile::Signedness sign) -> Operation * {
       auto valTy = cast<TensorType>(val.getType());
@@ -1018,71 +962,74 @@ struct MmaFPattern : public OpConversionPattern<cuda_tile::MmaFOp> {
 };
 
 // bitwise
-using AndIPattern = ConvertWithMap<cuda_tile::AndIOp, arith::AndIOp>;
+using AndIPattern = ConvertElementwise<cuda_tile::AndIOp, arith::AndIOp>;
 
 // integer
 // TODO: ignoring overflow information. could preserve some by using linalg
 // generic/map
-using AbsIPattern = ConvertWithMap<cuda_tile::AbsIOp, math::AbsIOp>;
-using AddIPattern = ReplaceWithLinalg<cuda_tile::AddIOp,
-                                      linalg::AddOp>; // ignore int overflow
-using SubIPattern = ReplaceWithLinalg<cuda_tile::SubIOp,
-                                      linalg::SubOp>; // ignore int overflow
-using MulIPattern = ReplaceWithLinalg<cuda_tile::MulIOp,
-                                      linalg::MulOp>; // ignore int overflow
-using ShLIPattern = ConvertWithMap<cuda_tile::ShLIOp,
-                                   arith::ShLIOp>; // ignore int overflow
-using OrIPattern = ConvertWithMap<cuda_tile::OrIOp, arith::OrIOp>;
-using XOrIPattern = ConvertWithMap<cuda_tile::XOrIOp, arith::XOrIOp>;
+using AbsIPattern = ConvertElementwise<cuda_tile::AbsIOp, math::AbsIOp>;
+using AddIPattern = ConvertElementwise<cuda_tile::AddIOp,
+                                       arith::AddIOp>; // ignore int overflow
+using SubIPattern = ConvertElementwise<cuda_tile::SubIOp,
+                                       arith::SubIOp>; // ignore int overflow
+using MulIPattern = ConvertElementwise<cuda_tile::MulIOp,
+                                       arith::MulIOp>; // ignore int overflow
+using ShLIPattern = ConvertElementwise<cuda_tile::ShLIOp,
+                                       arith::ShLIOp>; // ignore int overflow
+using OrIPattern = ConvertElementwise<cuda_tile::OrIOp, arith::OrIOp>;
+using XOrIPattern = ConvertElementwise<cuda_tile::XOrIOp, arith::XOrIOp>;
 using MaxIPattern =
-    MaxIMinIPattern<cuda_tile::MaxIOp, linalg::MaxOp, arith::MaxUIOp>;
+    MaxIMinIPattern<cuda_tile::MaxIOp, arith::MaxSIOp, arith::MaxUIOp>;
 using MinIPattern =
-    MaxIMinIPattern<cuda_tile::MinIOp, linalg::MinOp, arith::MinUIOp>;
+    MaxIMinIPattern<cuda_tile::MinIOp, arith::MinSIOp, arith::MinUIOp>;
 using ShRIPattern =
     SignedUnsignedPattern<cuda_tile::ShRIOp, arith::ShRSIOp, arith::ShRUIOp>;
 using RemIPattern =
     SignedUnsignedPattern<cuda_tile::RemIOp, arith::RemSIOp, arith::RemUIOp>;
 
 // floating point
-using AbsFPattern = ReplaceWithLinalg<cuda_tile::AbsFOp, linalg::AbsOp>;
-using CeilPattern = ReplaceWithLinalg<cuda_tile::CeilOp, linalg::CeilOp>;
-using FloorPattern = ReplaceWithLinalg<cuda_tile::FloorOp, linalg::FloorOp>;
-using Atan2Pattern = ConvertWithMap<cuda_tile::Atan2Op, math::Atan2Op>;
-using CoshPattern = ConvertWithMap<cuda_tile::CosHOp, math::CoshOp>;
-using CosPattern = ConvertWithMap<cuda_tile::CosOp, math::CosOp>;
-using ExpPattern = ReplaceWithLinalg<cuda_tile::ExpOp, linalg::ExpOp>;
-using Log2Pattern = ConvertWithMap<cuda_tile::Log2Op, math::Log2Op>;
-using LogPattern = ReplaceWithLinalg<cuda_tile::LogOp, linalg::LogOp>;
-using NegFPattern = ReplaceWithLinalg<cuda_tile::NegFOp, linalg::NegFOp>;
-using SinhPattern = ConvertWithMap<cuda_tile::SinHOp, math::SinhOp>;
-using SinPattern = ConvertWithMap<cuda_tile::SinOp, math::SinOp>;
-using TanPattern = ConvertWithMap<cuda_tile::TanOp, math::TanOp>;
+using AbsFPattern = ConvertElementwise<cuda_tile::AbsFOp, math::AbsFOp>;
+using CeilPattern = ConvertElementwise<cuda_tile::CeilOp, math::CeilOp>;
+using FloorPattern = ConvertElementwise<cuda_tile::FloorOp, math::FloorOp>;
+using Atan2Pattern = ConvertElementwise<cuda_tile::Atan2Op, math::Atan2Op>;
+using CoshPattern = ConvertElementwise<cuda_tile::CosHOp, math::CoshOp>;
+using CosPattern = ConvertElementwise<cuda_tile::CosOp, math::CosOp>;
+using ExpPattern = ConvertElementwise<cuda_tile::ExpOp, math::ExpOp>;
+using Log2Pattern = ConvertElementwise<cuda_tile::Log2Op, math::Log2Op>;
+using LogPattern = ConvertElementwise<cuda_tile::LogOp, math::LogOp>;
+using NegFPattern = ConvertElementwise<cuda_tile::NegFOp, arith::NegFOp>;
+using SinhPattern = ConvertElementwise<cuda_tile::SinHOp, math::SinhOp>;
+using SinPattern = ConvertElementwise<cuda_tile::SinOp, math::SinOp>;
+using TanPattern = ConvertElementwise<cuda_tile::TanOp, math::TanOp>;
 // TODO: specialize to square for pow 2
-using PowPattern = ReplaceWithLinalg<cuda_tile::PowOp, linalg::PowFOp>;
-using AddFPattern = ReplaceWithLinalg<cuda_tile::AddFOp,
-                                      linalg::AddOp>; // ignore rounding and ftz
-using DivFPattern = ReplaceWithLinalg<cuda_tile::DivFOp,
-                                      linalg::DivOp>; // ignore rounding and ftz
+using PowPattern = ConvertElementwise<cuda_tile::PowOp, math::PowFOp>;
+using AddFPattern =
+    ConvertElementwise<cuda_tile::AddFOp,
+                       arith::AddFOp>; // ignore rounding and ftz
+using DivFPattern =
+    ConvertElementwise<cuda_tile::DivFOp,
+                       arith::DivFOp>; // ignore rounding and ftz
 using Exp2Pattern =
-    ConvertWithMap<cuda_tile::Exp2Op, math::Exp2Op>; // ignore ftz
-using FmaPattern =
-    ConvertWithMap<cuda_tile::FmaOp, math::FmaOp>; // ignore rounding and ftz
+    ConvertElementwise<cuda_tile::Exp2Op, math::Exp2Op>; // ignore ftz
+using FmaPattern = ConvertElementwise<cuda_tile::FmaOp,
+                                      math::FmaOp>; // ignore rounding and ftz
 using MaxFPattern =
-    MaxFMinFPattern<cuda_tile::MaxFOp, linalg::MaxOp, arith::MaxNumFOp>;
+    MaxFMinFPattern<cuda_tile::MaxFOp, arith::MaximumFOp, arith::MaxNumFOp>;
 using MinFPattern =
-    MaxFMinFPattern<cuda_tile::MinFOp, linalg::MinOp, arith::MinNumFOp>;
-using MulFPattern = ReplaceWithLinalg<cuda_tile::MulFOp,
-                                      linalg::MulOp>; // ignore rounding and ftz
+    MaxFMinFPattern<cuda_tile::MinFOp, arith::MinimumFOp, arith::MinNumFOp>;
+using MulFPattern =
+    ConvertElementwise<cuda_tile::MulFOp,
+                       arith::MulFOp>; // ignore rounding and ftz
 using RsqrtPattern =
-    ReplaceWithLinalg<cuda_tile::RsqrtOp, linalg::RsqrtOp>; // ingore ftz
-using SubFPattern = ReplaceWithLinalg<cuda_tile::SubFOp,
-                                      linalg::SubOp>; // ignore rounding and ftz
-using SqrtPattern =
-    ReplaceWithLinalg<cuda_tile::SqrtOp,
-                      linalg::SqrtOp>; // ignore rounding and ftz
+    ConvertElementwise<cuda_tile::RsqrtOp, math::RsqrtOp>; // ignore ftz
+using SubFPattern =
+    ConvertElementwise<cuda_tile::SubFOp,
+                       arith::SubFOp>; // ignore rounding and ftz
+using SqrtPattern = ConvertElementwise<cuda_tile::SqrtOp,
+                                       math::SqrtOp>; // ignore rounding and ftz
 using TanHPattern =
-    ReplaceWithLinalg<cuda_tile::TanHOp, linalg::TanhOp>; // ignore rounding
-using RemFPattern = ConvertWithMap<cuda_tile::RemFOp, arith::RemFOp>;
+    ConvertElementwise<cuda_tile::TanHOp, math::TanhOp>; // ignore rounding
+using RemFPattern = ConvertElementwise<cuda_tile::RemFOp, arith::RemFOp>;
 
 struct PrintTkoPattern : public OpConversionPattern<cuda_tile::PrintTkoOp> {
   using OpConversionPattern<cuda_tile::PrintTkoOp>::OpConversionPattern;
@@ -1111,11 +1058,24 @@ struct PrintTkoPattern : public OpConversionPattern<cuda_tile::PrintTkoOp> {
       // store the tensor arg in a memref to call print
       auto loc = op.getLoc();
       auto tile = cast<TileType>(arg.getType());
-      auto memType = MemRefType::get(tile.getShape(), tile.getElementType());
-      auto unrankedMem = UnrankedMemRefType::get(tile.getElementType(), {});
+      Value printValue = convertedArg;
+      Type convertedType = getTypeConverter()->convertType(arg.getType());
+      RankedTensorType tensorType;
+      if (isScalarType(convertedType)) {
+        tensorType = RankedTensorType::get({}, convertedType);
+        printValue = tensor::FromElementsOp::create(rewriter, loc, tensorType,
+                                                    convertedArg);
+      } else {
+        tensorType = cast<RankedTensorType>(convertedType);
+      }
+
+      auto memType =
+          MemRefType::get(tensorType.getShape(), tensorType.getElementType());
+      auto unrankedMem =
+          UnrankedMemRefType::get(tensorType.getElementType(), {});
 
       auto bufferizeOp = bufferization::ToBufferOp::create(
-          rewriter, loc, memType, convertedArg, /*read_only=*/true);
+          rewriter, loc, memType, printValue, /*read_only=*/true);
       auto castOp = memref::CastOp::create(rewriter, loc, unrankedMem,
                                            bufferizeOp.getResult());
 
@@ -1191,9 +1151,8 @@ struct IfPattern : public OpConversionPattern<cuda_tile::IfOp> {
   LogicalResult
   matchAndRewrite(cuda_tile::IfOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    // the original condition is in a tile, we just want the scalar
-    auto cond = tensor::ExtractOp::create(rewriter, op.getLoc(),
-                                          adaptor.getCondition(), {});
+    auto cond =
+        extractScalarTensor(op.getLoc(), adaptor.getCondition(), rewriter);
 
     SmallVector<Type> types;
     if (getTypeConverter()
@@ -1224,6 +1183,12 @@ struct LoadPtrTkoPattern : public OpConversionPattern<cuda_tile::LoadPtrTkoOp> {
   matchAndRewrite(cuda_tile::LoadPtrTkoOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     auto ptrTy = getTypeConverter()->convertType(op.getResult());
+    if (isScalarType(ptrTy)) {
+      rewriter.replaceOpWithNewOp<cpu::LoadPtrOp>(op, ptrTy,
+                                                  adaptor.getSource());
+      return success();
+    }
+
     auto loadOp = rewriter.replaceOpWithNewOp<cpu::LoadPtrTileOp>(
         op, ptrTy, adaptor.getSource());
     return success();
@@ -1237,41 +1202,17 @@ struct StorePtrTkoPattern
   LogicalResult
   matchAndRewrite(cuda_tile::StorePtrTkoOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+    if (isScalarValue(adaptor.getDestination())) {
+      rewriter.replaceOpWithNewOp<cpu::StorePtrOp>(op, adaptor.getDestination(),
+                                                   adaptor.getValue());
+      return success();
+    }
+
     rewriter.replaceOpWithNewOp<cpu::StorePtrTileOp>(
         op, adaptor.getDestination(), adaptor.getValue());
     return success();
   }
 };
-
-static Value extractScalarTensorAsIndex(Location loc, Value value,
-                                        ConversionPatternRewriter &rewriter) {
-  if (isa<IndexType>(value.getType())) {
-    return value;
-  }
-
-  if (auto tensorType = dyn_cast<RankedTensorType>(value.getType())) {
-    if (tensorType.getRank() == 0) {
-      value = tensor::ExtractOp::create(rewriter, loc, value, ValueRange{});
-    }
-  }
-
-  if (isa<IndexType>(value.getType())) {
-    return value;
-  }
-
-  return arith::IndexCastUIOp::create(rewriter, loc, rewriter.getIndexType(),
-                                      value);
-}
-
-static Value extractScalarTensor(Location loc, Value value,
-                                 ConversionPatternRewriter &rewriter) {
-  if (auto tensorType = dyn_cast<RankedTensorType>(value.getType())) {
-    if (tensorType.getRank() == 0) {
-      return tensor::ExtractOp::create(rewriter, loc, value, ValueRange{});
-    }
-  }
-  return value;
-}
 
 static FailureOr<SmallVector<Value>>
 getPartitionTileOffsets(Operation *op, Value originalView, Value convertedView,
@@ -1341,18 +1282,15 @@ struct MakeTensorViewPattern
           op, "expected converted tensor view base to be an i64 pointer");
     }
 
-    SmallVector<Value> dynamicSizes;
-    dynamicSizes.reserve(adaptor.getDynamicShape().size());
-    for (Value size : adaptor.getDynamicShape()) {
-      dynamicSizes.push_back(extractScalarTensorAsIndex(loc, size, rewriter));
-    }
+    SmallVector<Value> dynamicSizes =
+        llvm::map_to_vector(adaptor.getDynamicShape(), [&](auto size) {
+          return extractScalarTensorAsIndex(loc, size, rewriter);
+        });
 
-    SmallVector<Value> dynamicStrides;
-    dynamicStrides.reserve(adaptor.getDynamicStrides().size());
-    for (Value stride : adaptor.getDynamicStrides()) {
-      dynamicStrides.push_back(
-          extractScalarTensorAsIndex(loc, stride, rewriter));
-    }
+    SmallVector<Value> dynamicStrides =
+        llvm::map_to_vector(adaptor.getDynamicStrides(), [&](auto stride) {
+          return extractScalarTensorAsIndex(loc, stride, rewriter);
+        });
 
     rewriter.replaceOpWithNewOp<cpu::MakeMemRefOp>(
         op, memrefType, base, dynamicSizes, dynamicStrides);
@@ -1367,7 +1305,7 @@ struct MakePartitionViewPattern
   LogicalResult
   matchAndRewrite(cuda_tile::MakePartitionViewOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    // partition will be used in LoadViewTkoPattern directly, no op needed here
+    // partition type will be used in LoadViewTkoPattern directly, no op needed
     rewriter.replaceOp(op, adaptor.getTensorView());
     return success();
   }
@@ -1379,14 +1317,19 @@ struct LoadViewTkoPattern
   LogicalResult
   matchAndRewrite(cuda_tile::LoadViewTkoOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    auto resultType = cast<RankedTensorType>(
-        getTypeConverter()->convertType(op.getTile().getType()));
-
     FailureOr<SmallVector<Value>> offsets = getPartitionTileOffsets(
         op, op.getView(), adaptor.getView(), adaptor.getIndex(), rewriter);
 
     if (failed(offsets)) {
       return failure();
+    }
+
+    Type resultType = getTypeConverter()->convertType(op.getTile().getType());
+    if (isScalarType(resultType)) {
+      auto load = memref::LoadOp::create(rewriter, op.getLoc(),
+                                         adaptor.getView(), *offsets);
+      rewriter.replaceOp(op, load.getResult());
+      return success();
     }
 
     auto load = cpu::LoadMemRefTileOp::create(rewriter, op.getLoc(), resultType,
@@ -1409,6 +1352,12 @@ struct StoreViewTkoPattern
 
     if (failed(offsets)) {
       return failure();
+    }
+
+    if (isScalarValue(adaptor.getTile())) {
+      rewriter.replaceOpWithNewOp<memref::StoreOp>(op, adaptor.getTile(),
+                                                   adaptor.getView(), *offsets);
+      return success();
     }
 
     rewriter.replaceOpWithNewOp<cpu::StoreMemRefTileOp>(
@@ -1445,7 +1394,7 @@ struct AssumePattern : public OpConversionPattern<cuda_tile::AssumeOp> {
   matchAndRewrite(cuda_tile::AssumeOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     // TODO: could maybe use llvm.assume?
-    rewriter.replaceOp(op, op.getValue());
+    rewriter.replaceOp(op, adaptor.getValue());
     return success();
   }
 };
@@ -1455,7 +1404,8 @@ struct MakeTokenPattern : public OpConversionPattern<cuda_tile::MakeTokenOp> {
   LogicalResult
   matchAndRewrite(cuda_tile::MakeTokenOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    // the tile kernel becomes a single thread on the cpu, so just ignore tokens
+    // the tile kernel becomes a single thread on the cpu, so just ignore
+    // tokens
     rewriter.eraseOp(op);
     return success();
   }

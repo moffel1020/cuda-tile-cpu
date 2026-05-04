@@ -23,12 +23,9 @@ using namespace llvm;
 
 namespace {
 
-static Value idxToTensorI32(PatternRewriter &rewriter, Location loc,
-                            Value idxVal) {
-  auto tensorTy = RankedTensorType::get({}, rewriter.getI32Type());
-  Value castOp =
-      arith::IndexCastOp::create(rewriter, loc, rewriter.getI32Type(), idxVal);
-  return tensor::FromElementsOp::create(rewriter, loc, tensorTy, castOp);
+static Value idxToI32(PatternRewriter &rewriter, Location loc, Value idxVal) {
+  return arith::IndexCastOp::create(rewriter, loc, rewriter.getI32Type(),
+                                    idxVal);
 }
 
 struct GetBlockIdPattern : public OpRewritePattern<cpu::GetBlockIdOp> {
@@ -40,9 +37,9 @@ struct GetBlockIdPattern : public OpRewritePattern<cpu::GetBlockIdOp> {
   LogicalResult matchAndRewrite(cpu::GetBlockIdOp op,
                                 PatternRewriter &rewriter) const override {
     rewriter.replaceOp(op, {
-                               idxToTensorI32(rewriter, op.getLoc(), ivX),
-                               idxToTensorI32(rewriter, op.getLoc(), ivY),
-                               idxToTensorI32(rewriter, op.getLoc(), ivZ),
+                               idxToI32(rewriter, op.getLoc(), ivX),
+                               idxToI32(rewriter, op.getLoc(), ivY),
+                               idxToI32(rewriter, op.getLoc(), ivZ),
                            });
     return success();
   }
@@ -66,10 +63,9 @@ struct GetNumBlocksPattern : public OpRewritePattern<cpu::GetNumBlocksOp> {
       return getValueOrCreateConstantIndexOp(rewriter, op.getLoc(), ofr);
     };
 
-    rewriter.replaceOp(
-        op, {idxToTensorI32(rewriter, op.getLoc(), boundVal(boundX)),
-             idxToTensorI32(rewriter, op.getLoc(), boundVal(boundY)),
-             idxToTensorI32(rewriter, op.getLoc(), boundVal(boundZ))});
+    rewriter.replaceOp(op, {idxToI32(rewriter, op.getLoc(), boundVal(boundX)),
+                            idxToI32(rewriter, op.getLoc(), boundVal(boundY)),
+                            idxToI32(rewriter, op.getLoc(), boundVal(boundZ))});
     return success();
   }
 

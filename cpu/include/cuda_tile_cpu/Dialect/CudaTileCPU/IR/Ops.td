@@ -71,17 +71,17 @@ def CudaTileCPU_GetNumBlocksOp : CudaTileCPU_Op<"get_num_blocks", [
   Pure,
   AllTypesMatch<["gridSize_x", "gridSize_y", "gridSize_z"]>
 ]> {
-  let summary = "Like cuda_tile.get_num_tile_blocks but with tensors";
+  let summary = "Like cuda_tile.get_num_tile_blocks but with scalars";
 
-  let results = (outs TensorRankOf<[I32], [0]>:$gridSize_x,
-                      TensorRankOf<[I32], [0]>:$gridSize_y,
-                      TensorRankOf<[I32], [0]>:$gridSize_z);
+  let results = (outs I32:$gridSize_x,
+                      I32:$gridSize_y,
+                      I32:$gridSize_z);
 
   let assemblyFormat = "attr-dict `:` type($gridSize_x)";
 
   let builders = [
     OpBuilder<(ins), [{
-      auto type = RankedTensorType::get({}, $_builder.getI32Type());
+      auto type = $_builder.getI32Type();
       build($_builder, $_state, type, type, type);
     }]>
   ];
@@ -91,17 +91,17 @@ def CudaTileCPU_GetBlockIdOp : CudaTileCPU_Op<"get_block_id", [
   Pure,
   AllTypesMatch<["blockId_x", "blockId_y", "blockId_z"]>
 ]> {
-  let summary = "Like cuda_tile.get_tile_block_id but with tensors";
+  let summary = "Like cuda_tile.get_tile_block_id but with scalars";
 
-  let results = (outs TensorRankOf<[I32], [0]>:$blockId_x,
-                      TensorRankOf<[I32], [0]>:$blockId_y,
-                      TensorRankOf<[I32], [0]>:$blockId_z);
+  let results = (outs I32:$blockId_x,
+                      I32:$blockId_y,
+                      I32:$blockId_z);
 
   let assemblyFormat = "attr-dict `:` type($blockId_x)";
 
   let builders = [
     OpBuilder<(ins), [{
-      auto type = RankedTensorType::get({}, $_builder.getI32Type());
+      auto type = $_builder.getI32Type();
       build($_builder, $_state, type, type, type);
     }]>
   ];
