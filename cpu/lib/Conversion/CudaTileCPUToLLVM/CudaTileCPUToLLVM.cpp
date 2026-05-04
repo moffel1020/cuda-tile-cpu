@@ -2,6 +2,7 @@
 #include "cuda_tile_cpu/Dialect/CudaTileCPU/IR/Dialect.h"
 #include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
 #include "mlir/Conversion/FuncToLLVM/ConvertFuncToLLVM.h"
+#include "mlir/Conversion/LLVMCommon/MemRefBuilder.h"
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
 #include "mlir/Conversion/MemRefToLLVM/MemRefToLLVM.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
@@ -165,15 +166,48 @@ struct MakeMemRefPattern : public OpConversionPattern<cpu::MakeMemRefOp> {
   LogicalResult
   matchAndRewrite(cpu::MakeMemRefOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    auto memTy = getTypeConverter()->convertType(
-        op.getType()); // convert memref to llvm ir struct
-    auto memOp = LLVM::UndefOp::create(rewriter, op.getLoc(), memTy);
+    auto memTy = dyn_cast<MemRefType>(op.getType());
+    if (!memTy) {
+      return failure();
+    }
+
+    auto structMemTy = getTypeConverter()->convertType(memTy);
+    auto desc = MemRefDescriptor::poison(rewriter, op.getLoc(), structMemTy);
+
     auto ptr = LLVM::IntToPtrOp::create(
         rewriter, op.getLoc(), LLVM::LLVMPointerType::get(getContext()),
         op.getPtr());
-    auto newOp = LLVM::InsertValueOp::create(rewriter, op.getLoc(), memTy,
-                                             memOp, ptr, 1);
-    rewriter.replaceOp(op, newOp);
+
+    desc.setAllocatedPtr(rewriter, op.getLoc(), ptr);
+    desc.setAlignedPtr(rewriter, op.getLoc(), ptr);
+
+    SmallVector<int64_t> strides;
+    int64_t offset;
+    if (failed(memTy.getStridesAndOffset(strides, offset))) {
+      return failure();
+    }
+    ArrayRef<int64_t> shape = memTy.getShape();
+    if (offset == ShapedType::kDynamic) {
+      return rewriter.notifyMatchFailure(op, "dynamic offset not supported");
+    }
+
+    desc.setConstantOffset(rewriter, op.getLoc(), offset);
+
+    for (auto [i, dim] : llvm::enumerate(shape)) {
+      if (dim == ShapedType::kDynamic) {
+        return rewriter.notifyMatchFailure(op, "dynamic shape not supported");
+      }
+      desc.setConstantSize(rewriter, op.getLoc(), i, dim);
+    }
+
+    for (auto [i, stride] : llvm::enumerate(strides)) {
+      if (stride == ShapedType::kDynamic) {
+        return rewriter.notifyMatchFailure(op, "dynamic strides not supported");
+      }
+      desc.setConstantStride(rewriter, op.getLoc(), i, stride);
+    }
+
+    rewriter.replaceOp(op, static_cast<mlir::Value>(desc));
     return success();
   }
 };
