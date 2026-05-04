@@ -193,18 +193,24 @@ struct MakeMemRefPattern : public OpConversionPattern<cpu::MakeMemRefOp> {
 
     desc.setConstantOffset(rewriter, op.getLoc(), offset);
 
+    uint32_t dynIdx = 0;
+    auto dynSizes = adaptor.getDynamicSizes();
     for (auto [i, dim] : llvm::enumerate(shape)) {
       if (dim == ShapedType::kDynamic) {
-        return rewriter.notifyMatchFailure(op, "dynamic shape not supported");
+        desc.setSize(rewriter, op.getLoc(), i, dynSizes[dynIdx++]);
+      } else {
+        desc.setConstantSize(rewriter, op.getLoc(), i, dim);
       }
-      desc.setConstantSize(rewriter, op.getLoc(), i, dim);
     }
 
+    dynIdx = 0;
+    auto dynStrides = adaptor.getDynamicStrides();
     for (auto [i, stride] : llvm::enumerate(strides)) {
       if (stride == ShapedType::kDynamic) {
-        return rewriter.notifyMatchFailure(op, "dynamic strides not supported");
+        desc.setStride(rewriter, op.getLoc(), i, dynStrides[dynIdx++]);
+      } else {
+        desc.setConstantStride(rewriter, op.getLoc(), i, stride);
       }
-      desc.setConstantStride(rewriter, op.getLoc(), i, stride);
     }
 
     rewriter.replaceOp(op, static_cast<mlir::Value>(desc));
