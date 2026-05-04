@@ -8,8 +8,6 @@
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
-#include "mlir/Dialect/Ptr/IR/PtrDialect.h"
-#include "mlir/Dialect/Ptr/IR/PtrOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -388,6 +386,21 @@ struct PermutePattern : public OpConversionPattern<cuda_tile::PermuteOp> {
 
     rewriter.replaceOpWithNewOp<linalg::TransposeOp>(op, adaptor.getSource(),
                                                      empty, permuteMap);
+    return success();
+  }
+};
+
+struct SelectPattern : public OpConversionPattern<cuda_tile::SelectOp> {
+  using OpConversionPattern<cuda_tile::SelectOp>::OpConversionPattern;
+  LogicalResult
+  matchAndRewrite(cuda_tile::SelectOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto opTy = op.getType();
+    auto empty = tensor::EmptyOp::create(rewriter, op.getLoc(), opTy.getShape(),
+                                         opTy.getElementType());
+    auto newOp = linalg::SelectOp::create(rewriter, op.getLoc(),
+                                          adaptor.getOperands(), {empty});
+    rewriter.replaceOp(op, newOp);
     return success();
   }
 };
@@ -1487,24 +1500,24 @@ struct ConvertCudaTileToStandard
     CudaTileTypeConverter typeConverter;
 
     RewritePatternSet patterns(context);
-    patterns
-        .add<EntryPattern, ReturnPattern, ConstantPattern, IotaPattern,
-             ReshapePattern, BroadcastPattern, OffsetPattern, CatPattern,
-             ExtractPattern, PermutePattern, AddIPattern, SubIPattern,
-             CmpIPattern, ShLIPattern, ShRIPattern, MulIPattern, DivIPattern,
-             NegIPattern, MulHiIPattern, OrIPattern, XOrIPattern, AndIPattern,
-             MaxIPattern, MinIPattern, RemIPattern, AbsIPattern, FloorPattern,
-             CeilPattern, AbsFPattern, Atan2Pattern, CoshPattern, CosPattern,
-             ExpPattern, Log2Pattern, NegFPattern, SinhPattern, SinPattern,
-             TanPattern, PowPattern, AddFPattern, DivFPattern, Exp2Pattern,
-             FmaPattern, MaxFPattern, MinFPattern, RsqrtPattern, SqrtPattern,
-             SqrtPattern, TanHPattern, RemFPattern, MmaFPattern, BitcastPattern,
-             ExtiPattern, FToIPattern, FToFPattern, IToFPattern, TruncIPattern,
-             MmaIPattern, YieldPattern, IfPattern, PrintTkoPattern,
-             LoadPtrTkoPattern, StorePtrTkoPattern, MakeTensorViewPattern,
-             MakePartitionViewPattern, LoadViewTkoPattern, StoreViewTkoPattern,
-             MakeTokenPattern, GetTileBlockIdPattern, GetNumTileBlocksPattern,
-             AssumePattern, MoveOutOfCudaTileModule>(typeConverter, context);
+    patterns.add<
+        EntryPattern, ReturnPattern, ConstantPattern, IotaPattern,
+        ReshapePattern, BroadcastPattern, OffsetPattern, CatPattern,
+        ExtractPattern, PermutePattern, SelectPattern, AddIPattern, SubIPattern,
+        CmpIPattern, ShLIPattern, ShRIPattern, MulIPattern, DivIPattern,
+        NegIPattern, MulHiIPattern, OrIPattern, XOrIPattern, AndIPattern,
+        MaxIPattern, MinIPattern, RemIPattern, AbsIPattern, FloorPattern,
+        CeilPattern, AbsFPattern, Atan2Pattern, CoshPattern, CosPattern,
+        ExpPattern, Log2Pattern, NegFPattern, SinhPattern, SinPattern,
+        TanPattern, PowPattern, AddFPattern, DivFPattern, Exp2Pattern,
+        FmaPattern, MaxFPattern, MinFPattern, RsqrtPattern, SqrtPattern,
+        SqrtPattern, TanHPattern, RemFPattern, MmaFPattern, BitcastPattern,
+        ExtiPattern, FToIPattern, FToFPattern, IToFPattern, TruncIPattern,
+        MmaIPattern, YieldPattern, IfPattern, PrintTkoPattern,
+        LoadPtrTkoPattern, StorePtrTkoPattern, MakeTensorViewPattern,
+        MakePartitionViewPattern, LoadViewTkoPattern, StoreViewTkoPattern,
+        MakeTokenPattern, GetTileBlockIdPattern, GetNumTileBlocksPattern,
+        AssumePattern, MoveOutOfCudaTileModule>(typeConverter, context);
 
     target.addIllegalDialect<CudaTileDialect>();
     target.addLegalDialect<
