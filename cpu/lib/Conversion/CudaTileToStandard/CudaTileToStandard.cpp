@@ -525,8 +525,8 @@ struct ReducePattern : public OpConversionPattern<cuda_tile::ReduceOp> {
 
     // create reduce op and convert arg types
     auto reduceOp = linalg::ReduceOp::create(
-        rewriter, op.getLoc(), linalgResultTypes, adaptor.getOperands(),
-        inits, ArrayRef<int64_t>{static_cast<int64_t>(op.getDim())});
+        rewriter, op.getLoc(), linalgResultTypes, adaptor.getOperands(), inits,
+        ArrayRef<int64_t>{static_cast<int64_t>(op.getDim())});
 
     Region &combiner = reduceOp.getCombiner();
     Block *combinerBlock = rewriter.createBlock(&combiner);
@@ -1236,6 +1236,7 @@ struct YieldPattern : public OpConversionPattern<cuda_tile::YieldOp> {
       rewriter.replaceOpWithNewOp<linalg::YieldOp>(op, adaptor.getOperands());
       return success();
     }
+    // TODO: scan op also constains yield
 
     return failure();
   }
@@ -1265,6 +1266,51 @@ struct IfPattern : public OpConversionPattern<cuda_tile::IfOp> {
     if (op.getElseBlock() != nullptr) {
       rewriter.inlineRegionBefore(op.getElseRegion(), newOp.getElseRegion(),
                                   newOp.getElseRegion().end());
+    }
+
+    rewriter.replaceOp(op, newOp);
+    return success();
+  }
+};
+
+struct ContinuePattern : public OpConversionPattern<cuda_tile::ContinueOp> {
+  using OpConversionPattern<cuda_tile::ContinueOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(cuda_tile::ContinueOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto parent = op->getParentOp();
+    // TODO: continue could be nested inside an if body. we cannot
+    // directly convert to scf.yield in that case.
+    // continue could also be in a loop op
+    if (!isa<scf::ForOp>(parent)) {
+      return failure();
+    }
+
+    rewriter.replaceOpWithNewOp<scf::YieldOp>(op, adaptor.getOperands());
+    return success();
+  }
+};
+
+struct ForPattern : public OpConversionPattern<cuda_tile::ForOp> {
+  using OpConversionPattern<cuda_tile::ForOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(cuda_tile::ForOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto newOp = scf::ForOp::create(
+        rewriter, op.getLoc(), adaptor.getLowerBound(), adaptor.getUpperBound(),
+        adaptor.getStep(), adaptor.getInitValues(), nullptr,
+        adaptor.getUnsignedCmp());
+
+    rewriter.inlineRegionBefore(op.getRegion(), newOp.getRegion(),
+                                newOp.getRegion().end());
+    // scf::ForOp::create already made an empty body, remove it
+    rewriter.eraseBlock(newOp.getBody());
+
+    if (failed(rewriter.convertRegionTypes(&newOp.getRegion(),
+                                           *getTypeConverter()))) {
+      return failure();
     }
 
     rewriter.replaceOp(op, newOp);
@@ -1560,11 +1606,11 @@ struct ConvertCudaTileToStandard
              RsqrtPattern, SqrtPattern, SqrtPattern, TanHPattern, RemFPattern,
              MmaFPattern, BitcastPattern, ExtiPattern, FToIPattern, FToFPattern,
              IToFPattern, TruncIPattern, MmaIPattern, YieldPattern, IfPattern,
-             PrintTkoPattern, LoadPtrTkoPattern, StorePtrTkoPattern,
-             MakeTensorViewPattern, MakePartitionViewPattern,
-             LoadViewTkoPattern, StoreViewTkoPattern, MakeTokenPattern,
-             GetTileBlockIdPattern, GetNumTileBlocksPattern, AssumePattern,
-             MoveOutOfCudaTileModule>(typeConverter, context);
+             ForPattern, ContinuePattern, PrintTkoPattern, LoadPtrTkoPattern,
+             StorePtrTkoPattern, MakeTensorViewPattern,
+             MakePartitionViewPattern, LoadViewTkoPattern, StoreViewTkoPattern,
+             MakeTokenPattern, GetTileBlockIdPattern, GetNumTileBlocksPattern,
+             AssumePattern, MoveOutOfCudaTileModule>(typeConverter, context);
 
     target.addIllegalDialect<CudaTileDialect>();
     target.addLegalDialect<
