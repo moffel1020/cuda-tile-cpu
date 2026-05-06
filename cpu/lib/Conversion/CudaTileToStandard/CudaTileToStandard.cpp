@@ -1553,6 +1553,23 @@ struct MakeTokenPattern : public OpConversionPattern<cuda_tile::MakeTokenOp> {
   }
 };
 
+template <typename Op>
+struct ForwardPtrI64Source : public OpConversionPattern<Op> {
+  using OpConversionPattern<Op>::OpConversionPattern;
+  LogicalResult
+  matchAndRewrite(Op op, typename Op::Adaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    // the typeconverter already converts all cuda tile ptrs to i64 so nothing
+    // needs to be done here
+    rewriter.replaceOp(op, adaptor.getSource());
+    return success();
+  }
+};
+
+using PtrToPtrPattern = ForwardPtrI64Source<cuda_tile::PtrToPtrOp>;
+using IntToPtrPattern = ForwardPtrI64Source<cuda_tile::IntToPtrOp>;
+using PtrToIntPattern = ForwardPtrI64Source<cuda_tile::PtrToIntOp>;
+
 struct MoveOutOfCudaTileModule
     : public OpConversionPattern<cuda_tile::ModuleOp> {
   using OpConversionPattern<cuda_tile::ModuleOp>::OpConversionPattern;
@@ -1609,7 +1626,8 @@ struct ConvertCudaTileToStandard
              ForPattern, ContinuePattern, PrintTkoPattern, LoadPtrTkoPattern,
              StorePtrTkoPattern, MakeTensorViewPattern,
              MakePartitionViewPattern, LoadViewTkoPattern, StoreViewTkoPattern,
-             MakeTokenPattern, GetTileBlockIdPattern, GetNumTileBlocksPattern,
+             MakeTokenPattern, PtrToPtrPattern, PtrToIntPattern,
+             IntToPtrPattern, GetTileBlockIdPattern, GetNumTileBlocksPattern,
              AssumePattern, MoveOutOfCudaTileModule>(typeConverter, context);
 
     target.addIllegalDialect<CudaTileDialect>();
