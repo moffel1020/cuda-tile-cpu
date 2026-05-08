@@ -667,7 +667,7 @@ struct CmpIPattern : public OpConversionPattern<cuda_tile::CmpIOp> {
 
     auto sign = op.getSignedness();
     auto pred = op.getComparisonPredicate();
-    auto cmpPred = [&] {
+    auto cmpPred = [&]() -> FailureOr<arith::CmpIPredicate> {
       using A = arith::CmpIPredicate;
       using S = cuda_tile::Signedness;
 
@@ -685,11 +685,15 @@ struct CmpIPattern : public OpConversionPattern<cuda_tile::CmpIOp> {
       case ComparisonPredicate::GREATER_THAN_OR_EQUAL:
         return sign == S::Signed ? A::sge : A::uge;
       default:
-        llvm_unreachable();
+        return failure();
       }
     }();
 
-    rewriter.replaceOpWithNewOp<arith::CmpIOp>(op, cmpPred, adaptor.getLhs(),
+    if (failed(cmpPred)) {
+      return rewriter.notifyMatchFailure(op, "unknown comparison predicate");
+    }
+
+    rewriter.replaceOpWithNewOp<arith::CmpIOp>(op, *cmpPred, adaptor.getLhs(),
                                                adaptor.getRhs());
     return success();
   }
@@ -945,7 +949,7 @@ struct CmpFPattern : public OpConversionPattern<cuda_tile::CmpFOp> {
 
     auto pred = op.getComparisonPredicate();
     auto ord = op.getComparisonOrdering();
-    auto arithPred = [&] {
+    auto arithPred = [&]() -> FailureOr<arith::CmpFPredicate> {
       using A = arith::CmpFPredicate;
       using CTA = cuda_tile::ComparisonPredicate;
       using O = cuda_tile::ComparisonOrdering;
@@ -964,11 +968,15 @@ struct CmpFPattern : public OpConversionPattern<cuda_tile::CmpFOp> {
       case CTA::NOT_EQUAL:
         return ord == O::ORDERED ? A::ONE : A::UNE;
       default:
-        llvm_unreachable();
+        return failure();
       }
     }();
 
-    rewriter.replaceOpWithNewOp<arith::CmpFOp>(op, arithPred, adaptor.getLhs(),
+    if (failed(arithPred)) {
+      return rewriter.notifyMatchFailure(op, "unknwon comparison predicate");
+    }
+
+    rewriter.replaceOpWithNewOp<arith::CmpFOp>(op, *arithPred, adaptor.getLhs(),
                                                adaptor.getRhs());
 
     return success();

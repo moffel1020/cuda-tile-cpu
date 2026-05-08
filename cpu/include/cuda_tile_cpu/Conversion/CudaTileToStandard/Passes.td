@@ -26,6 +26,7 @@ def LowerCudaTileCPUMemOps : Pass<"lower-cuda-tile-cpu-mem-ops", "mlir::ModuleOp
   let dependentDialects = ["mlir::cuda_tile::CudaTileDialect",
                            "mlir::cuda_tile::cpu::CudaTileCPUDialect",
                            "mlir::arith::ArithDialect",
+                           "mlir::ub::UBDialect",
                            "mlir::math::MathDialect",
                            "mlir::tensor::TensorDialect",
                            "mlir::vector::VectorDialect",

@@ -1,4 +1,4 @@
-#include "cuda_tile/Dialect/CudaTile/IR/Ops.h"
+#include "cuda_tile/Dialect/CudaTile/IR/Dialect.h"
 #include "cuda_tile_cpu/Conversion/CudaTileToStandard/Passes.h"
 #include "cuda_tile_cpu/Dialect/CudaTileCPU/IR/Dialect.h"
 #include "cuda_tile_cpu/Dialect/CudaTileCPU/IR/Types.h"
@@ -11,6 +11,7 @@
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/UB/IR/UBOps.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/Pass/Pass.h"
@@ -43,77 +44,198 @@ static bool hasOnlyZeroIndices(ValueRange indices) {
 struct LoadPtrTilePattern : public OpConversionPattern<cpu::LoadPtrTileOp> {
   using OpConversionPattern<cpu::LoadPtrTileOp>::OpConversionPattern;
 
-  // usually when fusing and vectorizing we get the following pattern:
-  // a = transfer_read of vector to tensor
-  // b = load_ptr_tile a
-  // transfer_write b from tensor to vector
-  // to prevent bufferization, we add this rewrite, which operates on the vector
-  // directly
-  static LogicalResult
-  rewriteWithoutVectorTransfer(cpu::LoadPtrTileOp op,
-                               ConversionPatternRewriter &rewriter,
-                               RankedTensorType ty) {
-    // TODO: could allow only a transfer read or only a transfer write, and use
-    // bufferization for one side only
+  static void lower0dLoad(cpu::LoadPtrTileOp op, OpAdaptor adaptor,
+                          ConversionPatternRewriter &rewriter) {
+    auto ty = op.getType();
+    auto memTy = MemRefType::get(ty.getShape(), ty.getElementType());
+    auto elemTy = cast<ShapedType>(op.getResult().getType()).getElementType();
+    auto ptr =
+        tensor::ExtractOp::create(rewriter, op.getLoc(), op.getSource(), {});
+    auto val = cpu::LoadPtrOp::create(rewriter, op.getLoc(), elemTy, ptr);
+    auto tensor = tensor::FromElementsOp::create(rewriter, op.getLoc(), {val});
+    rewriter.replaceOp(op, val);
+  }
 
-    if (!op->hasOneUse()) {
-      return failure();
+  // innerBodyBuilder must always create a yield op of the innermost loop.
+  // if useInnerIterArg is set to to true, that yield must return a result.
+  // the result is propagated to the outermost loop
+  static scf::ForOp
+  createLoopNest(ConversionPatternRewriter &rewriter, Location loc,
+                 ArrayRef<int64_t> shape, bool useInnerIterArg,
+                 ValueRange iterArgs,
+                 std::function<void(OpBuilder &, Location, ValueRange /*ivs*/,
+                                    ValueRange /*iterArgs*/)>
+                     innerBodyBuilder) {
+    OpBuilder::InsertionGuard insertGuard(rewriter);
+    SmallVector<Value> ivs;
+    SmallVector<scf::ForOp> forOps;
+
+    auto removeYieldTerminator = [&](scf::ForOp op) {
+      for (auto y : op.getOps<scf::YieldOp>()) {
+        rewriter.eraseOp(y);
+      }
+    };
+
+    auto dim = shape.size();
+    assert(dim >= 1);
+
+    auto lb = arith::ConstantIndexOp::create(rewriter, loc, 0);
+    auto step = arith::ConstantIndexOp::create(rewriter, loc, 1);
+
+    // create nested for loops
+    for (size_t d = 0; d < dim; d++) {
+      auto ub = arith::ConstantIndexOp::create(rewriter, loc, shape[d]);
+
+      auto lastIterArgs =
+          forOps.empty() ? iterArgs : forOps.back().getRegionIterArgs();
+
+
+      scf::ForOp forOp;
+
+      // user creates body of innermost loop
+      if (d == dim - 1) {
+        forOp = scf::ForOp::create(
+            rewriter, loc, lb, ub, step, lastIterArgs,
+            [&](OpBuilder &b, Location loc, Value iv, ValueRange iterArgs) {
+              ivs.push_back(iv);
+              innerBodyBuilder(b, loc, ivs, iterArgs);
+            });
+      } else {
+        forOp = scf::ForOp::create(rewriter, loc, lb, ub, step, lastIterArgs);
+        ivs.push_back(forOp.getInductionVar());
+      }
+
+      rewriter.setInsertionPointToStart(forOp.getBody());
+      forOps.push_back(forOp);
     }
 
+    // propagate yielded result to outermost loop
+    if (useInnerIterArg) {
+      for (int i = 0; i < forOps.size() - 1; i++) {
+        auto outerFor = forOps[i];
+        auto innerFor = forOps[i + 1];
+
+        rewriter.setInsertionPointToEnd(outerFor.getBody());
+        scf::YieldOp::create(rewriter, loc, innerFor.getResults());
+      }
+    }
+
+    return forOps.front();
+  }
+
+  // if the source tensor value is from a transfer write, return the vector
+  // value to work on to avoid bufferization
+  static Value getReplacementVectorFromTransferWrite(Operation *op) {
+    auto transferWrite = dyn_cast<vector::TransferWriteOp>(op);
+    if (transferWrite && !transferWrite.getMask() &&
+        hasOnlyZeroIndices(transferWrite.getIndices()) &&
+        transferWrite.getPermutationMap().isIdentity()) {
+      return transferWrite.getValueToStore();
+    }
+    return nullptr;
+  }
+
+  static bool shouldForwardVectorThroughTransferRead(cpu::LoadPtrTileOp op) {
     auto transferRead =
         dyn_cast<vector::TransferReadOp>(*op->getUsers().begin());
-    if (!transferRead || transferRead.getBase() != op.getResult() ||
-        transferRead.getMask() ||
-        !hasOnlyZeroIndices(transferRead.getIndices())) {
-      return failure();
+
+    return op->hasOneUse() && transferRead != nullptr &&
+           !transferRead.getMask() &&
+           hasOnlyZeroIndices(transferRead.getIndices()) &&
+           transferRead.getPermutationMap().isIdentity();
+  }
+
+  static void lowerNdLoad(cpu::LoadPtrTileOp op, OpAdaptor adaptor,
+                          ConversionPatternRewriter &rewriter) {
+    auto toOpFold = [](ValueRange vr) {
+      return llvm::map_to_vector(vr, [](Value v) { return OpFoldResult{v}; });
+    };
+    // TODO: this code sucks. maybe make it possible to have vector operands in
+    // the load_ptr_tile directly
+    auto ty = op.getType();
+    auto memTy = MemRefType::get(ty.getShape(), ty.getElementType());
+    auto elemTy = cast<ShapedType>(op.getResult().getType()).getElementType();
+
+    auto ptrVec =
+        getReplacementVectorFromTransferWrite(op.getSource().getDefiningOp());
+
+    auto maybeTransferRead =
+        dyn_cast<vector::TransferReadOp>(*op->getUsers().begin());
+    const bool forwardVec = shouldForwardVectorThroughTransferRead(op);
+
+    auto extractPtrElem = [&](OpBuilder &b, Location loc, ValueRange ivs,
+                              Value src) -> Value {
+      if (ptrVec == nullptr) {
+        return tensor::ExtractOp::create(b, loc, src, ivs);
+      } else {
+        return vector::ExtractOp::create(b, loc, src, toOpFold(ivs));
+      }
+    };
+
+    // will be cleaned up by canonicalizer if not used because of transfer read
+    auto values = memref::AllocOp::create(rewriter, op.getLoc(), memTy);
+
+    if (forwardVec) {
+      // create 1d vector. mlir can only lower vector.insert if only the lower
+      // dim is dynamic
+      auto numElems = maybeTransferRead.getVectorType().getNumElements();
+      Value initVec = ub::PoisonOp::create(rewriter, op.getLoc(),
+                                           VectorType::get({numElems}, elemTy));
+      auto lb = arith::ConstantIndexOp::create(rewriter, op.getLoc(), 0);
+      auto ub = arith::ConstantIndexOp::create(rewriter, op.getLoc(),
+                                               ty.getNumElements());
+      auto step = arith::ConstantIndexOp::create(rewriter, op.getLoc(), 1);
+
+      // get ptr tile input values and make 1d
+      Value src;
+      if (ptrVec != nullptr) {
+        auto ptrVecTy =
+            VectorType::get(ArrayRef<int64_t>{numElems}, rewriter.getI64Type());
+        src = vector::ShapeCastOp::create(rewriter, op.getLoc(), ptrVecTy,
+                                          ptrVec);
+      } else {
+        auto shapeType = RankedTensorType::get({1}, rewriter.getIndexType());
+        auto attr = DenseElementsAttr::get(
+            shapeType, APInt{64, static_cast<uint64_t>(numElems), false});
+        auto constShape =
+            arith::ConstantOp::create(rewriter, op.getLoc(), attr);
+        auto reshapeTy =
+            RankedTensorType::get({numElems}, rewriter.getI64Type());
+        src = tensor::ReshapeOp::create(rewriter, op.getLoc(), reshapeTy,
+                                        op.getSource(), constShape);
+      }
+
+      auto forOp = scf::ForOp::create(
+          rewriter, op.getLoc(), lb, ub, step, initVec,
+          [&](OpBuilder &b, Location loc, Value iv, ValueRange iterArgs) {
+            Value ptr = extractPtrElem(b, loc, iv, src);
+            auto val = cpu::LoadPtrOp::create(b, loc, elemTy, ptr);
+            Value inserted = vector::InsertOp::create(b, loc, val, iterArgs[0],
+                                                      toOpFold(iv));
+            scf::YieldOp::create(b, loc, inserted);
+          });
+
+      // shape cast back to Nd vector
+      auto result = vector::ShapeCastOp::create(
+          rewriter, op.getLoc(), maybeTransferRead.getVectorType(),
+          forOp->getResult(0));
+      rewriter.replaceOp(maybeTransferRead, result);
+    } else {
+      // create a loop nest which stores in a memref
+
+      auto outerFor = createLoopNest(
+          rewriter, op.getLoc(), ty.getShape(), false, {},
+          [&](OpBuilder &b, Location loc, ValueRange ivs, ValueRange iterArgs) {
+            Value ptr = extractPtrElem(b, loc, ivs, op.getSource());
+            auto val = cpu::LoadPtrOp::create(rewriter, loc, elemTy, ptr);
+            memref::StoreOp::create(rewriter, loc, val, values, ivs);
+            scf::YieldOp::create(b, loc);
+          });
+
+      auto tensor = bufferization::ToTensorOp::create(rewriter, op.getLoc(), ty,
+                                                      values, true);
+      rewriter.replaceOp(op, tensor);
     }
-
-    auto vectorTy = transferRead.getVectorType();
-    if (vectorTy.getRank() != 1 || vectorTy.isScalable() ||
-        vectorTy.getDimSize(0) != ty.getDimSize(0)) {
-      return failure();
-    }
-
-    auto transferWrite =
-        op.getSource().getDefiningOp<vector::TransferWriteOp>();
-    if (!transferWrite || transferWrite.getResult() != op.getSource() ||
-        transferWrite.getMask() ||
-        !hasOnlyZeroIndices(transferWrite.getIndices())) {
-      return failure();
-    }
-
-    auto ptrVectorTy = transferWrite.getVectorType();
-    if (ptrVectorTy.getRank() != 1 || ptrVectorTy.isScalable() ||
-        ptrVectorTy.getDimSize(0) != ty.getDimSize(0)) {
-      return failure();
-    }
-
-    Location loc = op.getLoc();
-    auto elemTy = ty.getElementType();
-    auto lb = arith::ConstantIndexOp::create(rewriter, loc, 0);
-    auto ub = arith::ConstantIndexOp::create(rewriter, loc, ty.getDimSize(0));
-    auto step = arith::ConstantIndexOp::create(rewriter, loc, 1);
-    auto init = vector::BroadcastOp::create(rewriter, loc, vectorTy,
-                                            transferRead.getPadding());
-
-    auto loop = scf::ForOp::create(
-        rewriter, loc, lb, ub, step, ValueRange{init.getResult()},
-        [&](OpBuilder &b, Location loc, Value iv, ValueRange iterArgs) {
-          auto ptr =
-              vector::ExtractOp::create(b, loc, transferWrite.getValueToStore(),
-                                        ArrayRef<OpFoldResult>{iv});
-          auto val = cpu::LoadPtrOp::create(b, loc, elemTy, ptr);
-          auto next = vector::InsertOp::create(b, loc, val, iterArgs[0],
-                                               ArrayRef<OpFoldResult>{iv});
-          scf::YieldOp::create(b, loc, next.getResult());
-        });
-
-    rewriter.replaceOp(transferRead, loop.getResult(0));
-    rewriter.eraseOp(op);
-    if (transferWrite->use_empty()) {
-      rewriter.eraseOp(transferWrite);
-    }
-    return success();
   }
 
   LogicalResult
@@ -125,50 +247,11 @@ struct LoadPtrTilePattern : public OpConversionPattern<cpu::LoadPtrTileOp> {
     auto elemTy = cast<ShapedType>(op.getResult().getType()).getElementType();
 
     if (ty.getRank() == 0) {
-      auto values = memref::AllocOp::create(rewriter, op.getLoc(), memTy);
-      auto ptr =
-          tensor::ExtractOp::create(rewriter, op.getLoc(), op.getSource(), {});
-      auto val = cpu::LoadPtrOp::create(rewriter, op.getLoc(), elemTy, ptr);
-      memref::StoreOp::create(rewriter, op.getLoc(), val, values);
-      auto buffer = bufferization::ToTensorOp::create(rewriter, op.getLoc(), ty,
-                                                      values, true);
-      rewriter.replaceOp(op, buffer);
+      lower0dLoad(op, adaptor, rewriter);
       return success();
     }
 
-    if (ty.getRank() != 1) { // TODO: support higher dims
-      return failure();
-    }
-
-    if (succeeded(rewriteWithoutVectorTransfer(op, rewriter, ty))) {
-      return success();
-    }
-
-    // fallback path, use bufferization from and to tensors using intermediate
-    // memrefs
-    auto values = memref::AllocOp::create(rewriter, op.getLoc(), memTy);
-    auto sourceTy = op.getSource().getType();
-    auto srcMemref = bufferization::ToBufferOp::create(
-        rewriter, op.getLoc(),
-        MemRefType::get(sourceTy.getShape(), sourceTy.getElementType()),
-        op.getSource(), true);
-
-    auto lb = arith::ConstantIndexOp::create(rewriter, op.getLoc(), 0);
-    auto ub =
-        arith::ConstantIndexOp::create(rewriter, op.getLoc(), ty.getShape()[0]);
-    auto step = arith::ConstantIndexOp::create(rewriter, op.getLoc(), 1);
-    scf::ForOp::create(
-        rewriter, op.getLoc(), lb, ub, step, ValueRange{},
-        [&](OpBuilder &b, Location loc, Value i, ValueRange) {
-          auto ptr = memref::LoadOp::create(b, loc, srcMemref, i);
-          auto val = cpu::LoadPtrOp::create(b, op.getLoc(), elemTy, ptr);
-          memref::StoreOp::create(b, loc, val, values, i);
-          scf::YieldOp::create(b, loc);
-        });
-
-    auto tensor = bufferization::ToTensorOp::create(rewriter, op.getLoc(), ty,
-                                                    values, true);
-    rewriter.replaceOp(op, tensor);
+    lowerNdLoad(op, adaptor, rewriter);
     return success();
   }
 };
@@ -407,11 +490,11 @@ struct LowerCudaTileCPUMemOps
                         cpu::LoadMemRefTileOp, cpu::StoreMemRefTileOp>();
 
     target.addLegalDialect<
-        arith::ArithDialect, affine::AffineDialect, func::FuncDialect,
-        memref::MemRefDialect, bufferization::BufferizationDialect,
-        linalg::LinalgDialect, tensor::TensorDialect, math::MathDialect,
-        scf::SCFDialect, vector::VectorDialect,
-        cuda_tile::cpu::CudaTileCPUDialect>();
+        ub::UBDialect, arith::ArithDialect, affine::AffineDialect,
+        func::FuncDialect, memref::MemRefDialect,
+        bufferization::BufferizationDialect, linalg::LinalgDialect,
+        tensor::TensorDialect, math::MathDialect, scf::SCFDialect,
+        vector::VectorDialect, cuda_tile::cpu::CudaTileCPUDialect>();
 
     if (failed(applyPartialConversion(mod, target, std::move(patterns)))) {
       signalPassFailure();

@@ -71,7 +71,7 @@ private:
       return funcOp;
     }
 
-    OpBuilder::InsertionGuard insertGaurd(rewriter);
+    OpBuilder::InsertionGuard insertGuard(rewriter);
     rewriter.setInsertionPointToStart(mod.getBody());
     auto funcOp = LLVM::LLVMFuncOp::create(rewriter, mod.getLoc(), fnName, fnTy,
                                            LLVM::Linkage::External);
