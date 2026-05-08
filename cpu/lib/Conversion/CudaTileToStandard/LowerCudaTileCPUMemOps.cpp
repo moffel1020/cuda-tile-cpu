@@ -40,99 +40,98 @@ static bool hasOnlyZeroIndices(ValueRange indices) {
   return llvm::all_of(
       indices, [](Value index) { return matchPattern(index, m_Zero()); });
 }
+static SmallVector<OpFoldResult> toOpFold(ValueRange vr) {
+  return llvm::map_to_vector(vr, [](Value v) { return OpFoldResult{v}; });
+};
+
+// if the source tensor value is from a transfer write, return the vector
+// value to work on to avoid bufferization
+static Value getReplacementVectorFromTransferWrite(Operation *op) {
+  auto transferWrite = dyn_cast<vector::TransferWriteOp>(op);
+  if (transferWrite && !transferWrite.getMask() &&
+      hasOnlyZeroIndices(transferWrite.getIndices()) &&
+      transferWrite.getPermutationMap().isIdentity()) {
+    return transferWrite.getValueToStore();
+  }
+  return nullptr;
+}
+
+// innerBodyBuilder must always create a yield op of the innermost loop.
+// if useInnerIterArg is set to to true, that yield must return a result.
+// the result is propagated to the outermost loop
+static scf::ForOp
+createLoopNest(ConversionPatternRewriter &rewriter, Location loc,
+               ArrayRef<int64_t> shape, bool useInnerIterArg,
+               ValueRange iterArgs,
+               std::function<void(OpBuilder &, Location, ValueRange /*ivs*/,
+                                  ValueRange /*iterArgs*/)>
+                   innerBodyBuilder) {
+  OpBuilder::InsertionGuard insertGuard(rewriter);
+  SmallVector<Value> ivs;
+  SmallVector<scf::ForOp> forOps;
+
+  auto removeYieldTerminator = [&](scf::ForOp op) {
+    for (auto y : op.getOps<scf::YieldOp>()) {
+      rewriter.eraseOp(y);
+    }
+  };
+
+  auto dim = shape.size();
+  assert(dim >= 1);
+
+  auto lb = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  auto step = arith::ConstantIndexOp::create(rewriter, loc, 1);
+
+  // create nested for loops
+  for (size_t d = 0; d < dim; d++) {
+    auto ub = arith::ConstantIndexOp::create(rewriter, loc, shape[d]);
+
+    auto lastIterArgs =
+        forOps.empty() ? iterArgs : forOps.back().getRegionIterArgs();
+
+    scf::ForOp forOp;
+    // user creates body of innermost loop
+    if (d == dim - 1) {
+      forOp = scf::ForOp::create(
+          rewriter, loc, lb, ub, step, lastIterArgs,
+          [&](OpBuilder &b, Location loc, Value iv, ValueRange iterArgs) {
+            ivs.push_back(iv);
+            innerBodyBuilder(b, loc, ivs, iterArgs);
+          });
+    } else {
+      forOp = scf::ForOp::create(rewriter, loc, lb, ub, step, lastIterArgs);
+      ivs.push_back(forOp.getInductionVar());
+    }
+
+    rewriter.setInsertionPointToStart(forOp.getBody());
+    forOps.push_back(forOp);
+  }
+
+  // propagate yielded result to outermost loop
+  if (useInnerIterArg) {
+    for (int i = 0; i < forOps.size() - 1; i++) {
+      auto outerFor = forOps[i];
+      auto innerFor = forOps[i + 1];
+
+      rewriter.setInsertionPointToEnd(outerFor.getBody());
+      scf::YieldOp::create(rewriter, loc, innerFor.getResults());
+    }
+  }
+
+  return forOps.front();
+}
 
 struct LoadPtrTilePattern : public OpConversionPattern<cpu::LoadPtrTileOp> {
   using OpConversionPattern<cpu::LoadPtrTileOp>::OpConversionPattern;
 
   static void lower0dLoad(cpu::LoadPtrTileOp op, OpAdaptor adaptor,
                           ConversionPatternRewriter &rewriter) {
-    auto ty = op.getType();
-    auto memTy = MemRefType::get(ty.getShape(), ty.getElementType());
     auto elemTy = cast<ShapedType>(op.getResult().getType()).getElementType();
     auto ptr =
         tensor::ExtractOp::create(rewriter, op.getLoc(), op.getSource(), {});
     auto val = cpu::LoadPtrOp::create(rewriter, op.getLoc(), elemTy, ptr);
     auto tensor = tensor::FromElementsOp::create(rewriter, op.getLoc(), {val});
     rewriter.replaceOp(op, val);
-  }
-
-  // innerBodyBuilder must always create a yield op of the innermost loop.
-  // if useInnerIterArg is set to to true, that yield must return a result.
-  // the result is propagated to the outermost loop
-  static scf::ForOp
-  createLoopNest(ConversionPatternRewriter &rewriter, Location loc,
-                 ArrayRef<int64_t> shape, bool useInnerIterArg,
-                 ValueRange iterArgs,
-                 std::function<void(OpBuilder &, Location, ValueRange /*ivs*/,
-                                    ValueRange /*iterArgs*/)>
-                     innerBodyBuilder) {
-    OpBuilder::InsertionGuard insertGuard(rewriter);
-    SmallVector<Value> ivs;
-    SmallVector<scf::ForOp> forOps;
-
-    auto removeYieldTerminator = [&](scf::ForOp op) {
-      for (auto y : op.getOps<scf::YieldOp>()) {
-        rewriter.eraseOp(y);
-      }
-    };
-
-    auto dim = shape.size();
-    assert(dim >= 1);
-
-    auto lb = arith::ConstantIndexOp::create(rewriter, loc, 0);
-    auto step = arith::ConstantIndexOp::create(rewriter, loc, 1);
-
-    // create nested for loops
-    for (size_t d = 0; d < dim; d++) {
-      auto ub = arith::ConstantIndexOp::create(rewriter, loc, shape[d]);
-
-      auto lastIterArgs =
-          forOps.empty() ? iterArgs : forOps.back().getRegionIterArgs();
-
-
-      scf::ForOp forOp;
-
-      // user creates body of innermost loop
-      if (d == dim - 1) {
-        forOp = scf::ForOp::create(
-            rewriter, loc, lb, ub, step, lastIterArgs,
-            [&](OpBuilder &b, Location loc, Value iv, ValueRange iterArgs) {
-              ivs.push_back(iv);
-              innerBodyBuilder(b, loc, ivs, iterArgs);
-            });
-      } else {
-        forOp = scf::ForOp::create(rewriter, loc, lb, ub, step, lastIterArgs);
-        ivs.push_back(forOp.getInductionVar());
-      }
-
-      rewriter.setInsertionPointToStart(forOp.getBody());
-      forOps.push_back(forOp);
-    }
-
-    // propagate yielded result to outermost loop
-    if (useInnerIterArg) {
-      for (int i = 0; i < forOps.size() - 1; i++) {
-        auto outerFor = forOps[i];
-        auto innerFor = forOps[i + 1];
-
-        rewriter.setInsertionPointToEnd(outerFor.getBody());
-        scf::YieldOp::create(rewriter, loc, innerFor.getResults());
-      }
-    }
-
-    return forOps.front();
-  }
-
-  // if the source tensor value is from a transfer write, return the vector
-  // value to work on to avoid bufferization
-  static Value getReplacementVectorFromTransferWrite(Operation *op) {
-    auto transferWrite = dyn_cast<vector::TransferWriteOp>(op);
-    if (transferWrite && !transferWrite.getMask() &&
-        hasOnlyZeroIndices(transferWrite.getIndices()) &&
-        transferWrite.getPermutationMap().isIdentity()) {
-      return transferWrite.getValueToStore();
-    }
-    return nullptr;
   }
 
   static bool shouldForwardVectorThroughTransferRead(cpu::LoadPtrTileOp op) {
@@ -145,11 +144,9 @@ struct LoadPtrTilePattern : public OpConversionPattern<cpu::LoadPtrTileOp> {
            transferRead.getPermutationMap().isIdentity();
   }
 
-  static void lowerNdLoad(cpu::LoadPtrTileOp op, OpAdaptor adaptor,
+  static void lowerNdLoadWithLoop(cpu::LoadPtrTileOp op, OpAdaptor adaptor,
                           ConversionPatternRewriter &rewriter) {
-    auto toOpFold = [](ValueRange vr) {
-      return llvm::map_to_vector(vr, [](Value v) { return OpFoldResult{v}; });
-    };
+
     // TODO: this code sucks. maybe make it possible to have vector operands in
     // the load_ptr_tile directly
     auto ty = op.getType();
@@ -251,7 +248,7 @@ struct LoadPtrTilePattern : public OpConversionPattern<cpu::LoadPtrTileOp> {
       return success();
     }
 
-    lowerNdLoad(op, adaptor, rewriter);
+    lowerNdLoadWithLoop(op, adaptor, rewriter);
     return success();
   }
 };
@@ -259,108 +256,64 @@ struct LoadPtrTilePattern : public OpConversionPattern<cpu::LoadPtrTileOp> {
 struct StorePtrTilePattern : OpConversionPattern<cpu::StorePtrTileOp> {
   using OpConversionPattern<cpu::StorePtrTileOp>::OpConversionPattern;
 
-  // When vectorization produces:
-  //   %ptr_tensor = vector.transfer_write %ptr_vec, ...
-  //   %val_tensor = vector.transfer_write %val_vec, ...
-  //   cuda_tile_cpu.store_ptr_tile %ptr_tensor, %val_tensor
-  // avoid materializing both tensors and store directly from the vectors.
-  static LogicalResult
-  rewriteWithoutVectorTransfer(cpu::StorePtrTileOp op,
-                               ConversionPatternRewriter &rewriter,
-                               RankedTensorType ty) {
-    auto destTransferWrite =
-        op.getDestination().getDefiningOp<vector::TransferWriteOp>();
-    if (!destTransferWrite ||
-        destTransferWrite.getResult() != op.getDestination() ||
-        destTransferWrite.getMask() ||
-        !hasOnlyZeroIndices(destTransferWrite.getIndices())) {
-      return failure();
-    }
+  static void lower0dStore(cpu::StorePtrTileOp op, OpAdaptor adaptor,
+                           ConversionPatternRewriter &rewriter) {
+    auto ptr =
+        tensor::ExtractOp::create(rewriter, op.getLoc(), op.getDestination());
+    auto val = tensor::ExtractOp::create(rewriter, op.getLoc(), op.getValue());
+    auto storeOp = cpu::StorePtrOp::create(rewriter, op.getLoc(), ptr, val);
+    rewriter.replaceOp(op, storeOp);
+  }
 
-    auto valueTransferWrite =
-        op.getValue().getDefiningOp<vector::TransferWriteOp>();
-    if (!valueTransferWrite ||
-        valueTransferWrite.getResult() != op.getValue() ||
-        valueTransferWrite.getMask() ||
-        !hasOnlyZeroIndices(valueTransferWrite.getIndices())) {
-      return failure();
-    }
+  static void lowerNdStoreWithLoop(cpu::StorePtrTileOp op, OpAdaptor adaptor,
+                           ConversionPatternRewriter &rewriter) {
+    auto ptrTileTy = op.getDestination().getType();
+    auto valTileTy = op.getValue().getType();
+    auto numElems = ptrTileTy.getNumElements();
 
-    auto ptrVectorTy = destTransferWrite.getVectorType();
-    auto valueVectorTy = valueTransferWrite.getVectorType();
-    if (ptrVectorTy.getRank() != 1 || ptrVectorTy.isScalable() ||
-        ptrVectorTy.getDimSize(0) != ty.getDimSize(0) ||
-        valueVectorTy.getRank() != 1 || valueVectorTy.isScalable() ||
-        valueVectorTy.getDimSize(0) != ty.getDimSize(0)) {
-      return failure();
-    }
+    auto c0 = arith::ConstantIndexOp::create(rewriter, op.getLoc(), 0);
+    auto ptrVecTy =
+        VectorType::get(ptrTileTy.getShape(), ptrTileTy.getElementType());
+    auto ptrVec1dTy = VectorType::get({numElems}, ptrTileTy.getElementType());
+    auto ptrVec = vector::TransferReadOp::create(rewriter, op.getLoc(),
+                                                 ptrVecTy, op.getDestination(),
+                                                 {c0, c0}, std::nullopt);
+    auto ptrVec1d =
+        vector::ShapeCastOp::create(rewriter, op.getLoc(), ptrVec1dTy, ptrVec);
 
-    Location loc = op.getLoc();
-    auto lb = arith::ConstantIndexOp::create(rewriter, loc, 0);
-    auto ub = arith::ConstantIndexOp::create(rewriter, loc, ty.getDimSize(0));
-    auto step = arith::ConstantIndexOp::create(rewriter, loc, 1);
-    scf::ForOp::create(rewriter, loc, lb, ub, step, ValueRange{},
-                       [&](OpBuilder &b, Location loc, Value iv, ValueRange) {
-                         auto ptr = vector::ExtractOp::create(
-                             b, loc, destTransferWrite.getValueToStore(),
-                             ArrayRef<OpFoldResult>{iv});
-                         auto val = vector::ExtractOp::create(
-                             b, loc, valueTransferWrite.getValueToStore(),
-                             ArrayRef<OpFoldResult>{iv});
-                         cpu::StorePtrOp::create(b, loc, ptr, val);
-                         scf::YieldOp::create(b, loc);
-                       });
+    auto valVecTy =
+        VectorType::get(ptrTileTy.getShape(), valTileTy.getElementType());
+    auto valVec1dTy = VectorType::get({numElems}, valTileTy.getElementType());
+    auto valVec = vector::TransferReadOp::create(
+        rewriter, op.getLoc(), valVecTy, op.getValue(), {c0, c0}, std::nullopt);
+    auto valVec1d =
+        vector::ShapeCastOp::create(rewriter, op.getLoc(), valVec1dTy, valVec);
 
-    rewriter.eraseOp(op);
-    if (destTransferWrite->use_empty()) {
-      rewriter.eraseOp(destTransferWrite);
-    }
-    if (valueTransferWrite->use_empty()) {
-      rewriter.eraseOp(valueTransferWrite);
-    }
-    return success();
+    auto lb = arith::ConstantIndexOp::create(rewriter, op.getLoc(), 0);
+    auto ub = arith::ConstantIndexOp::create(rewriter, op.getLoc(), numElems);
+    auto step = arith::ConstantIndexOp::create(rewriter, op.getLoc(), 1);
+    auto loop = scf::ForOp::create(
+        rewriter, op.getLoc(), lb, ub, step, {},
+        [&](OpBuilder &b, Location loc, Value iv, ValueRange) {
+          auto ptr = vector::ExtractOp::create(b, loc, ptrVec1d, iv);
+          auto val = vector::ExtractOp::create(b, loc, valVec1d, iv);
+          cpu::StorePtrOp::create(b, loc, ptr, val);
+          scf::YieldOp::create(b, loc);
+        });
+
+      rewriter.replaceOp(op, loop);
   }
 
   LogicalResult
   matchAndRewrite(cpu::StorePtrTileOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-
     auto ty = op.getValue().getType();
-    if (ty.getRank() != 1) {
-      return failure(); // TODO
-    }
-
-    if (succeeded(rewriteWithoutVectorTransfer(op, rewriter, ty))) {
+    if (ty.getRank() == 0) {
+      lower0dStore(op, adaptor, rewriter);
       return success();
     }
 
-    // fallback path, use tensor buffers
-    auto destTy = op.getDestination().getType();
-    auto destMemref = bufferization::ToBufferOp::create(
-        rewriter, op.getLoc(),
-        MemRefType::get(destTy.getShape(), destTy.getElementType()),
-        op.getDestination(), true);
-
-    auto valTy = op.getValue().getType();
-    auto valMemref = bufferization::ToBufferOp::create(
-        rewriter, op.getLoc(),
-        MemRefType::get(valTy.getShape(), valTy.getElementType()),
-        op.getValue(), true);
-
-    auto lb = arith::ConstantIndexOp::create(rewriter, op.getLoc(), 0);
-    auto ub =
-        arith::ConstantIndexOp::create(rewriter, op.getLoc(), ty.getShape()[0]);
-    auto step = arith::ConstantIndexOp::create(rewriter, op.getLoc(), 1);
-    auto loop = scf::ForOp::create(
-        rewriter, op.getLoc(), lb, ub, step, ValueRange{},
-        [&](OpBuilder &b, Location loc, Value i, ValueRange) {
-          auto ptr = memref::LoadOp::create(b, loc, destMemref, i);
-          auto val = memref::LoadOp::create(b, loc, valMemref, i);
-          cpu::StorePtrOp::create(b, loc, ptr, val);
-          scf::YieldOp::create(b, loc);
-        });
-
-    rewriter.replaceOp(op, loop);
+    lowerNdStoreWithLoop(op, adaptor, rewriter);
     return success();
   }
 };
