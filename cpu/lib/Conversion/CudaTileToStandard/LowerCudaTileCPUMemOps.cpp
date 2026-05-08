@@ -145,7 +145,7 @@ struct LoadPtrTilePattern : public OpConversionPattern<cpu::LoadPtrTileOp> {
   }
 
   static void lowerNdLoadWithLoop(cpu::LoadPtrTileOp op, OpAdaptor adaptor,
-                          ConversionPatternRewriter &rewriter) {
+                                  ConversionPatternRewriter &rewriter) {
 
     // TODO: this code sucks. maybe make it possible to have vector operands in
     // the load_ptr_tile directly
@@ -266,26 +266,32 @@ struct StorePtrTilePattern : OpConversionPattern<cpu::StorePtrTileOp> {
   }
 
   static void lowerNdStoreWithLoop(cpu::StorePtrTileOp op, OpAdaptor adaptor,
-                           ConversionPatternRewriter &rewriter) {
+                                   ConversionPatternRewriter &rewriter) {
     auto ptrTileTy = op.getDestination().getType();
     auto valTileTy = op.getValue().getType();
     auto numElems = ptrTileTy.getNumElements();
 
     auto c0 = arith::ConstantIndexOp::create(rewriter, op.getLoc(), 0);
+    SmallVector<Value> zeroIndices;
+    for (size_t i = 0; i < ptrTileTy.getShape().size(); i++) {
+      zeroIndices.push_back(c0);
+    }
+
     auto ptrVecTy =
         VectorType::get(ptrTileTy.getShape(), ptrTileTy.getElementType());
     auto ptrVec1dTy = VectorType::get({numElems}, ptrTileTy.getElementType());
     auto ptrVec = vector::TransferReadOp::create(rewriter, op.getLoc(),
                                                  ptrVecTy, op.getDestination(),
-                                                 {c0, c0}, std::nullopt);
+                                                 zeroIndices, std::nullopt);
     auto ptrVec1d =
         vector::ShapeCastOp::create(rewriter, op.getLoc(), ptrVec1dTy, ptrVec);
 
     auto valVecTy =
         VectorType::get(ptrTileTy.getShape(), valTileTy.getElementType());
     auto valVec1dTy = VectorType::get({numElems}, valTileTy.getElementType());
-    auto valVec = vector::TransferReadOp::create(
-        rewriter, op.getLoc(), valVecTy, op.getValue(), {c0, c0}, std::nullopt);
+    auto valVec = vector::TransferReadOp::create(rewriter, op.getLoc(),
+                                                 valVecTy, op.getValue(),
+                                                 zeroIndices, std::nullopt);
     auto valVec1d =
         vector::ShapeCastOp::create(rewriter, op.getLoc(), valVec1dTy, valVec);
 
@@ -301,7 +307,7 @@ struct StorePtrTilePattern : OpConversionPattern<cpu::StorePtrTileOp> {
           scf::YieldOp::create(b, loc);
         });
 
-      rewriter.replaceOp(op, loop);
+    rewriter.replaceOp(op, loop);
   }
 
   LogicalResult
