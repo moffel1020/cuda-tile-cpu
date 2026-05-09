@@ -1334,13 +1334,16 @@ struct LoadPtrTkoPattern : public OpConversionPattern<cuda_tile::LoadPtrTkoOp> {
                   ConversionPatternRewriter &rewriter) const override {
     auto ptrTy = getTypeConverter()->convertType(op.getResult());
     if (isScalarType(ptrTy)) {
+      assert(!op.getMask() && !op.getPaddingValue() &&
+             "scalar ptr load was assumed not to have mask or padding val");
       rewriter.replaceOpWithNewOp<cpu::LoadPtrOp>(op, ptrTy,
                                                   adaptor.getSource());
       return success();
     }
 
     auto loadOp = rewriter.replaceOpWithNewOp<cpu::LoadPtrTileOp>(
-        op, ptrTy, adaptor.getSource());
+        op, ptrTy, adaptor.getSource(), adaptor.getMask(),
+        adaptor.getPaddingValue());
     return success();
   }
 };
@@ -1353,13 +1356,15 @@ struct StorePtrTkoPattern
   matchAndRewrite(cuda_tile::StorePtrTkoOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     if (isScalarValue(adaptor.getDestination())) {
+      assert(!op.getMask() &&
+             "scalar ptr store was assumed not to have a mask");
       rewriter.replaceOpWithNewOp<cpu::StorePtrOp>(op, adaptor.getDestination(),
                                                    adaptor.getValue());
       return success();
     }
 
     rewriter.replaceOpWithNewOp<cpu::StorePtrTileOp>(
-        op, adaptor.getDestination(), adaptor.getValue());
+        op, adaptor.getDestination(), adaptor.getValue(), adaptor.getMask());
     return success();
   }
 };

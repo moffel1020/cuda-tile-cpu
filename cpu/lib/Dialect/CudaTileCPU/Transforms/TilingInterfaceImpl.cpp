@@ -79,21 +79,42 @@ struct LoadPtrTileOpTilingInterface
                          ArrayRef<OpFoldResult> sizes) const {
     auto loadOp = cast<cpu::LoadPtrTileOp>(op);
     auto resTy = loadOp.getType();
-    auto src = loadOp.getSource();
     Location loc = loadOp.getLoc();
-
     SmallVector<OpFoldResult> strides(resTy.getRank(), b.getIndexAttr(1));
-    auto slice =
+
+    auto src = loadOp.getSource();
+    auto sourceSlice =
         tensor::ExtractSliceOp::create(b, loc, src, offsets, sizes, strides);
 
-    auto slicedShape = slice.getType().getShape();
+    auto mask = loadOp.getMask();
+    auto maskSlice = mask ? tensor::ExtractSliceOp::create(
+                                b, loc, mask, offsets, sizes, strides)
+                          : nullptr;
+
+    auto padding = loadOp.getPaddingValue();
+    auto paddingSlice = padding ? tensor::ExtractSliceOp::create(
+                                      b, loc, padding, offsets, sizes, strides)
+                                : nullptr;
+
+    auto slicedShape = sourceSlice.getType().getShape();
     auto slicedResTy =
         RankedTensorType::get(slicedShape, resTy.getElementType());
 
-    auto tiledLoad = cpu::LoadPtrTileOp::create(b, loc, slicedResTy, slice);
-    return TilingResult{{tiledLoad.getOperation()},
-                        {tiledLoad.getResult()},
-                        {slice.getOperation()}};
+    auto tiledLoad = cpu::LoadPtrTileOp::create(
+        b, loc, slicedResTy, sourceSlice, maskSlice, paddingSlice);
+
+    auto tilingResult = TilingResult{{tiledLoad.getOperation()},
+                                     {tiledLoad.getResult()},
+                                     {sourceSlice.getOperation()}};
+    if (mask != nullptr) {
+      tilingResult.generatedSlices.push_back(maskSlice.getOperation());
+    }
+
+    if (padding != nullptr) {
+      tilingResult.generatedSlices.push_back(paddingSlice.getOperation());
+    }
+
+    return tilingResult;
   }
 
   LogicalResult
@@ -145,8 +166,8 @@ struct StorePtrTileOpTilingInterface
     auto valueTy = storeOp.getValue().getType();
     Location loc = storeOp.getLoc();
 
-    if (offsets.size() != static_cast<size_t>(valueTy.getRank()) ||
-        sizes.size() != static_cast<size_t>(valueTy.getRank())) {
+    if (offsets.size() != valueTy.getRank() ||
+        sizes.size() != valueTy.getRank()) {
       return failure();
     }
 
@@ -156,11 +177,25 @@ struct StorePtrTileOpTilingInterface
     auto valueSlice = tensor::ExtractSliceOp::create(b, loc, storeOp.getValue(),
                                                      offsets, sizes, strides);
 
+    auto mask = storeOp.getMask();
+    auto maskSlice = mask ? tensor::ExtractSliceOp::create(
+                                b, loc, mask, offsets, sizes, strides)
+                          : nullptr;
+
     auto tiledStore =
-        cpu::StorePtrTileOp::create(b, loc, destSlice, valueSlice);
-    return TilingResult{{tiledStore.getOperation()},
-                        {},
-                        {destSlice.getOperation(), valueSlice.getOperation()}};
+        cpu::StorePtrTileOp::create(b, loc, destSlice, valueSlice, maskSlice);
+
+    if (maskSlice != nullptr) {
+      return TilingResult{{tiledStore.getOperation()},
+                          {},
+                          {destSlice.getOperation(), valueSlice.getOperation(),
+                           maskSlice.getOperation()}};
+    } else {
+      return TilingResult{
+          {tiledStore.getOperation()},
+          {},
+          {destSlice.getOperation(), valueSlice.getOperation()}};
+    }
   }
 };
 

@@ -107,13 +107,23 @@ def CudaTileCPU_GetBlockIdOp : CudaTileCPU_Op<"get_block_id", [
   ];
 }
 
-def CudaTileCPU_LoadPtrTileOp : CudaTileCPU_Op<"load_ptr_tile", [MemoryEffects<[MemRead]>]> {
+def CudaTileCPU_LoadPtrTileOp : CudaTileCPU_Op<"load_ptr_tile", [
+  MemoryEffects<[MemRead]>, 
+  AttrSizedOperandSegments
+]> {
   let summary = "load a tensor from a tensor of pointers";
 
-  let arguments = (ins RankedTensorOf<[I64]>:$source); // TODO: mask, padding?
-  let results = (outs AnyRankedTensor:$result); // TODO: could verify type
+  let arguments = (ins RankedTensorOf<[I64]>:$source,
+                       Optional<RankedTensorOf<[I1]>>:$mask,
+                       Optional<AnyRankedTensor>:$paddingValue);
 
-  let assemblyFormat = "$source attr-dict `:` type($source) `->` type($result)";
+  let results = (outs AnyRankedTensor:$result);
+
+  let assemblyFormat = [{
+    $source (`,` $mask^)? (`,` $paddingValue^)? 
+    attr-dict `:` type($source) (`,` type($mask)^)? (`,` type($paddingValue)^)?
+    `->` type($result)
+  }];
 }
 
 def CudaTileCPU_LoadPtrOp : CudaTileCPU_Op<"load_ptr", [MemoryEffects<[MemRead]>]> {
@@ -128,9 +138,19 @@ def CudaTileCPU_LoadPtrOp : CudaTileCPU_Op<"load_ptr", [MemoryEffects<[MemRead]>
 def CudaTileCPU_StorePtrTileOp : CudaTileCPU_Op<"store_ptr_tile", [MemoryEffects<[MemWrite]>]> {
   let summary = "store tensor to the addresses of a tensor of  pointers";
 
-  let arguments = (ins RankedTensorOf<[I64]>:$destination, AnyRankedTensor:$value); // TODO mask
+  let arguments = (ins RankedTensorOf<[I64]>:$destination, 
+                       AnyRankedTensor:$value, 
+                       Optional<RankedTensorOf<[I1]>>:$mask);
 
-  let assemblyFormat = "$destination `,` $value attr-dict `:` type($destination) `,` type($value)";
+  let assemblyFormat = [{
+    $destination 
+    `,` $value 
+    (`,` $mask^)? 
+    attr-dict 
+    `:` type($destination) 
+    `,` type($value) 
+    (`,` type($mask)^)?
+  }];
 }
 
 def CudaTileCPU_StorePtrOp : CudaTileCPU_Op<"store_ptr", [MemoryEffects<[MemWrite]>]> {
