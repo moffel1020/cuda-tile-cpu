@@ -311,38 +311,6 @@ struct StorePtrTilePattern : OpConversionPattern<cpu::StorePtrTileOp> {
   }
 };
 
-static FailureOr<memref::SubViewOp>
-createMemRefTileSubview(Operation *op, Value source, ValueRange offsets,
-                        RankedTensorType tileType,
-                        ConversionPatternRewriter &rewriter) {
-  auto sourceType = dyn_cast<MemRefType>(source.getType());
-  if (!sourceType) {
-    return failure();
-  }
-  if (sourceType.getRank() != tileType.getRank() ||
-      offsets.size() != sourceType.getRank()) {
-    return op->emitOpError("expected memref, tensor tile, and offset ranks to "
-                           "match");
-  }
-  if (!tileType.hasStaticShape()) {
-    return op->emitOpError("dynamic load/store memref tile shapes are not "
-                           "supported yet");
-  }
-
-  SmallVector<OpFoldResult> mixedOffsets(offsets.begin(), offsets.end());
-  SmallVector<OpFoldResult> sizes;
-  SmallVector<OpFoldResult> strides;
-  sizes.reserve(tileType.getRank());
-  strides.reserve(tileType.getRank());
-  for (int64_t size : tileType.getShape()) {
-    sizes.push_back(rewriter.getIndexAttr(size));
-    strides.push_back(rewriter.getIndexAttr(1));
-  }
-
-  return memref::SubViewOp::create(rewriter, op->getLoc(), source, mixedOffsets,
-                                   sizes, strides);
-}
-
 struct LoadMemRefTilePattern
     : public OpConversionPattern<cpu::LoadMemRefTileOp> {
   using OpConversionPattern<cpu::LoadMemRefTileOp>::OpConversionPattern;
@@ -350,16 +318,28 @@ struct LoadMemRefTilePattern
   matchAndRewrite(cpu::LoadMemRefTileOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     auto tileType = cast<RankedTensorType>(op.getType());
-    FailureOr<memref::SubViewOp> subview = createMemRefTileSubview(
-        op, adaptor.getSource(), adaptor.getOffsets(), tileType, rewriter);
-    if (failed(subview)) {
-      return failure();
+
+    auto c0 = arith::ConstantIndexOp::create(rewriter, op.getLoc(), 0);
+    SmallVector<Value> zeroIndices;
+    SmallVector<bool> notInBounds;
+    for (size_t i = 0; i < tileType.getShape().size(); i++) {
+      zeroIndices.push_back(c0);
+      notInBounds.push_back(false);
     }
 
-    auto tensor = bufferization::ToTensorOp::create(
-        rewriter, op.getLoc(), op.getType(), subview->getResult(),
-        /*restrict=*/true, /*writable=*/false);
-    rewriter.replaceOp(op, tensor);
+    auto vecTy =
+        VectorType::get(tileType.getShape(), tileType.getElementType());
+    auto vecRead = vector::TransferReadOp::create(
+        rewriter, op.getLoc(), vecTy, op.getSource(), op.getOffsets(),
+        std::nullopt, notInBounds);
+
+    // this write should get optimized away by canonicalizer, there is likely a
+    // transfer read after it
+    auto empty = tensor::EmptyOp::create(rewriter, op.getLoc(), tileType, {});
+    auto vecWrite = vector::TransferWriteOp::create(
+        rewriter, op.getLoc(), vecRead, empty, zeroIndices, notInBounds);
+
+    rewriter.replaceOp(op, vecWrite);
     return success();
   }
 };
@@ -368,50 +348,32 @@ struct StoreMemRefTilePattern
     : public OpConversionPattern<cpu::StoreMemRefTileOp> {
   using OpConversionPattern<cpu::StoreMemRefTileOp>::OpConversionPattern;
 
-  static LogicalResult rewriteWithoutVectorTransfer(
-      cpu::StoreMemRefTileOp op, memref::SubViewOp subview,
-      ConversionPatternRewriter &rewriter, RankedTensorType tileType) {
-    auto transferWrite = op.getValue().getDefiningOp<vector::TransferWriteOp>();
-    if (!transferWrite || transferWrite.getResult() != op.getValue() ||
-        transferWrite.getMask() ||
-        !hasOnlyZeroIndices(transferWrite.getIndices())) {
-      return failure();
-    }
-
-    auto write = vector::TransferWriteOp::create(
-        rewriter, op.getLoc(), transferWrite.getValueToStore(),
-        subview.getResult(), transferWrite.getIndices(),
-        transferWrite.getPermutationMapAttr(), transferWrite.getMask(),
-        transferWrite.getInBoundsAttr());
-
-    rewriter.replaceOp(op, write);
-    if (transferWrite->use_empty()) {
-      rewriter.eraseOp(transferWrite);
-    }
-    return success();
-  }
-
   LogicalResult
   matchAndRewrite(cpu::StoreMemRefTileOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     auto tileType = cast<RankedTensorType>(op.getValue().getType());
 
-    FailureOr<memref::SubViewOp> subview = createMemRefTileSubview(
-        op, op.getDestination(), op.getOffsets(), tileType, rewriter);
-    if (failed(subview)) {
-      return failure();
+    auto c0 = arith::ConstantIndexOp::create(rewriter, op.getLoc(), 0);
+    SmallVector<Value> zeroIndices;
+    SmallVector<bool> notInBounds;
+    for (size_t i = 0; i < tileType.getShape().size(); i++) {
+      zeroIndices.push_back(c0);
+      notInBounds.push_back(false);
     }
 
-    if (succeeded(
-            rewriteWithoutVectorTransfer(op, *subview, rewriter, tileType))) {
-      return success();
-    }
+    auto vecTy =
+        VectorType::get(tileType.getShape(), tileType.getElementType());
+    // this read should go away after canonicalizer, there is likely a tranfer
+    // write before it
+    auto valueVec = vector::TransferReadOp::create(rewriter, op.getLoc(), vecTy,
+                                                   op.getValue(), zeroIndices,
+                                                   std::nullopt, std::nullopt);
 
-    // fallback
-    auto materialize = bufferization::MaterializeInDestinationOp::create(
-        rewriter, op.getLoc(), Type{}, adaptor.getValue(), subview->getResult(),
-        /*restrict=*/false, /*writable=*/true);
-    rewriter.replaceOp(op, materialize);
+    auto vecWrite = vector::TransferWriteOp::create(
+        rewriter, op.getLoc(), valueVec, op.getDestination(), op.getOffsets(),
+        notInBounds);
+    rewriter.replaceOp(op, vecWrite);
+
     return success();
   }
 };

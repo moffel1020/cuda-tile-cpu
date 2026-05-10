@@ -47,6 +47,8 @@ public:
     });
 
     addConversion([&](cuda_tile::PartitionViewType type) -> Type {
+      // note: this loses information (padding, tile size), make sure to save
+      // that elsewhere if it is still needed
       return convertTensorViewToMemRef(type.getTensorView());
     });
   }
@@ -1369,54 +1371,6 @@ struct StorePtrTkoPattern
   }
 };
 
-static FailureOr<SmallVector<Value>>
-getPartitionTileOffsets(Operation *op, Value originalView, Value convertedView,
-                        ValueRange indices,
-                        ConversionPatternRewriter &rewriter) {
-  auto partitionViewType =
-      dyn_cast<cuda_tile::PartitionViewType>(originalView.getType());
-  if (!partitionViewType) {
-    return rewriter.notifyMatchFailure(
-        op, "only partition_view loads and stores are supported");
-  }
-
-  auto dimMap = partitionViewType.getDimMap();
-  for (auto [index, dim] : llvm::enumerate(dimMap)) {
-    if (static_cast<int64_t>(dim) != index) {
-      return rewriter.notifyMatchFailure(
-          op,
-          "non-identity partition view dim_map is not yet supported in cuda "
-          "tile cpu");
-    }
-  }
-
-  auto memrefType = dyn_cast<MemRefType>(convertedView.getType());
-  if (!memrefType) {
-    return failure();
-  }
-
-  Location loc = op->getLoc();
-  ArrayRef<int32_t> tileShape = partitionViewType.getTileShape().asArrayRef();
-
-  if (tileShape.size() != memrefType.getRank() ||
-      indices.size() != memrefType.getRank()) {
-    return rewriter.notifyMatchFailure(
-        op, "partition view rank must match memref and index ranks");
-  }
-
-  SmallVector<Value> offsets;
-  offsets.reserve(memrefType.getRank());
-  for (auto [indexValue, tileSize] : llvm::zip_equal(indices, tileShape)) {
-    Value index = extractScalarTensorAsIndex(loc, indexValue, rewriter);
-    Value tileSizeValue =
-        arith::ConstantIndexOp::create(rewriter, loc, tileSize);
-    auto offset = arith::MulIOp::create(rewriter, loc, index, tileSizeValue);
-    offsets.push_back(offset.getResult());
-  }
-
-  return offsets;
-}
-
 struct MakeTensorViewPattern
     : public OpConversionPattern<cuda_tile::MakeTensorViewOp> {
   using OpConversionPattern<cuda_tile::MakeTensorViewOp>::OpConversionPattern;
@@ -1432,10 +1386,6 @@ struct MakeTensorViewPattern
 
     Location loc = op.getLoc();
     Value base = extractScalarTensor(loc, adaptor.getBase(), rewriter);
-    if (!base.getType().isInteger(64)) {
-      return rewriter.notifyMatchFailure(
-          op, "expected converted tensor view base to be an i64 pointer");
-    }
 
     SmallVector<Value> dynamicSizes =
         llvm::map_to_vector(adaptor.getDynamicShape(), [&](auto size) {
@@ -1466,31 +1416,56 @@ struct MakePartitionViewPattern
   }
 };
 
+// convert partition view tile indices to element offsets
+static FailureOr<SmallVector<Value>>
+calculateViewOffsets(ConversionPatternRewriter &rewriter, Location loc,
+                     PartitionViewType pvt, ValueRange indices) {
+  for (auto [index, dimMap] : llvm::enumerate(pvt.getDimMap())) {
+    if (index != dimMap) {
+      return failure(); // TODO
+    }
+  }
+
+  auto shape = pvt.getTileShape().asArrayRef();
+  SmallVector<Value> offsets;
+  for (auto [size, idx] : llvm::zip_equal(shape, indices)) {
+    auto c = arith::ConstantIndexOp::create(rewriter, loc, size);
+    auto idxScalar = extractScalarTensorAsIndex(loc, idx, rewriter);
+    auto off = arith::MulIOp::create(rewriter, loc, idxScalar, c);
+    offsets.push_back(off);
+  }
+
+  return offsets;
+}
+
 struct LoadViewTkoPattern
     : public OpConversionPattern<cuda_tile::LoadViewTkoOp> {
   using OpConversionPattern<cuda_tile::LoadViewTkoOp>::OpConversionPattern;
   LogicalResult
   matchAndRewrite(cuda_tile::LoadViewTkoOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    FailureOr<SmallVector<Value>> offsets = getPartitionTileOffsets(
-        op, op.getView(), adaptor.getView(), adaptor.getIndex(), rewriter);
 
+    auto view = dyn_cast<PartitionViewType>(op.getView().getType());
+    if (!view) {
+      // partition view is the only subview type in cuda tile 13.3
+      return failure();
+    }
+
+    auto offsets =
+        calculateViewOffsets(rewriter, op.getLoc(), view, adaptor.getIndex());
     if (failed(offsets)) {
       return failure();
     }
 
-    Type resultType = getTypeConverter()->convertType(op.getTile().getType());
-    if (isScalarType(resultType)) {
-      auto load = memref::LoadOp::create(rewriter, op.getLoc(),
-                                         adaptor.getView(), *offsets);
-      rewriter.replaceOp(op, load.getResult());
-      return success();
+    if (view.getPaddingValue() != nullptr) {
+      return failure(); // TODO: padding value support
     }
 
-    auto load = cpu::LoadMemRefTileOp::create(rewriter, op.getLoc(), resultType,
-                                              adaptor.getView(), *offsets);
+    auto resTy = getTypeConverter()->convertType(op.getResult(0));
+    auto newOp = cpu::LoadMemRefTileOp::create(rewriter, op.getLoc(), resTy,
+                                               adaptor.getView(), *offsets);
 
-    rewriter.replaceOp(op, load);
+    rewriter.replaceOp(op, newOp);
     return success();
   }
 };
@@ -1502,17 +1477,16 @@ struct StoreViewTkoPattern
   LogicalResult
   matchAndRewrite(cuda_tile::StoreViewTkoOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    FailureOr<SmallVector<Value>> offsets = getPartitionTileOffsets(
-        op, op.getView(), adaptor.getView(), adaptor.getIndex(), rewriter);
-
-    if (failed(offsets)) {
+    auto view = dyn_cast<PartitionViewType>(op.getView().getType());
+    if (!view) {
+      // partition view is the only subview type in cuda tile 13.3
       return failure();
     }
 
-    if (isScalarValue(adaptor.getTile())) {
-      rewriter.replaceOpWithNewOp<memref::StoreOp>(op, adaptor.getTile(),
-                                                   adaptor.getView(), *offsets);
-      return success();
+    auto offsets =
+        calculateViewOffsets(rewriter, op.getLoc(), view, adaptor.getIndex());
+    if (failed(offsets)) {
+      return failure();
     }
 
     rewriter.replaceOpWithNewOp<cpu::StoreMemRefTileOp>(
