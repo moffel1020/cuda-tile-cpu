@@ -25,18 +25,22 @@ using namespace llvm;
 namespace {
 
 static SmallVector<OpFoldResult>
-getTileSizesForStore(OpBuilder &builder, TilingInterface storeOp,
-                     ArrayRef<int64_t> requestedTileSizes) {
-  SmallVector<Range> domain = storeOp.getIterationDomain(builder);
+getTileSizesForStore(OpBuilder &b, TilingInterface storeOp,
+                     ArrayRef<int64_t> requestedSizes) {
+  const int64_t defaultTileSize = 1;
+
+  SmallVector<Range> domain = storeOp.getIterationDomain(b);
   SmallVector<OpFoldResult> tileSizeOfrs;
   tileSizeOfrs.reserve(domain.size());
 
-  for (auto [index, range] : llvm::enumerate(domain)) {
-    int64_t tileSize = 32;
-    if (index < requestedTileSizes.size()) {
-      tileSize = requestedTileSizes[index];
+  for (size_t i = 0; i < domain.size(); i++) {
+    auto reqStart = static_cast<int64_t>(domain.size()) -
+                    static_cast<int64_t>(requestedSizes.size());
+    if (static_cast<int64_t>(i) >= reqStart) {
+      tileSizeOfrs.push_back(b.getIndexAttr(requestedSizes[i - reqStart]));
+    } else {
+      tileSizeOfrs.push_back(b.getIndexAttr(defaultTileSize));
     }
-    tileSizeOfrs.push_back(builder.getIndexAttr(tileSize));
   }
 
   return tileSizeOfrs;
