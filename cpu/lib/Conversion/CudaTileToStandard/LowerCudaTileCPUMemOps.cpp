@@ -314,6 +314,37 @@ struct StorePtrTilePattern : OpConversionPattern<cpu::StorePtrTileOp> {
 struct LoadMemRefTilePattern
     : public OpConversionPattern<cpu::LoadMemRefTileOp> {
   using OpConversionPattern<cpu::LoadMemRefTileOp>::OpConversionPattern;
+
+  static FailureOr<TypedAttr>
+  convertPaddingAttr(ConversionPatternRewriter &rewriter,
+                     cuda_tile::PaddingValue val, Type elemTy) {
+    if (!(elemTy.isFloat() ||
+          (elemTy.isIntOrFloat() && val == PaddingValue::zero))) {
+      return failure();
+    }
+
+    switch (val) {
+    case PaddingValue::neg_zero: {
+      llvm::APFloat floatVal(cast<FloatType>(elemTy).getFloatSemantics());
+      floatVal.changeSign();
+      return static_cast<TypedAttr>(rewriter.getFloatAttr(elemTy, floatVal));
+    }
+    case PaddingValue::nan:
+      return static_cast<TypedAttr>(rewriter.getFloatAttr(
+          elemTy, std::numeric_limits<double>::quiet_NaN()));
+    case PaddingValue::pos_inf:
+      return static_cast<TypedAttr>(rewriter.getFloatAttr(
+          elemTy, std::numeric_limits<double>::infinity()));
+    case PaddingValue::neg_inf:
+      return static_cast<TypedAttr>(rewriter.getFloatAttr(
+          elemTy, -std::numeric_limits<double>::infinity()));
+    case PaddingValue::zero:
+      return static_cast<TypedAttr>(rewriter.getZeroAttr(elemTy));
+    default:
+      return failure();
+    }
+  }
+
   LogicalResult
   matchAndRewrite(cpu::LoadMemRefTileOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
@@ -327,14 +358,24 @@ struct LoadMemRefTilePattern
       notInBounds.push_back(false);
     }
 
+    std::optional<Value> padding;
+    if (auto paddingVal = op.getPaddingValue()) {
+      auto attr =
+          convertPaddingAttr(rewriter, *paddingVal, tileType.getElementType());
+      if (failed(attr)) {
+        return failure();
+      }
+      padding = arith::ConstantOp::create(rewriter, op.getLoc(), *attr);
+    }
+
     auto vecTy =
         VectorType::get(tileType.getShape(), tileType.getElementType());
     auto vecRead = vector::TransferReadOp::create(
-        rewriter, op.getLoc(), vecTy, op.getSource(), op.getOffsets(),
-        std::nullopt, notInBounds);
+        rewriter, op.getLoc(), vecTy, op.getSource(), op.getOffsets(), padding,
+        notInBounds);
 
-    // this write should get optimized away by canonicalizer, there is likely a
-    // transfer read after it
+    // this write should get optimized away by canonicalizer, there is likely
+    // a transfer read after it
     auto empty = tensor::EmptyOp::create(rewriter, op.getLoc(), tileType, {});
     auto vecWrite = vector::TransferWriteOp::create(
         rewriter, op.getLoc(), vecRead, empty, zeroIndices, notInBounds);

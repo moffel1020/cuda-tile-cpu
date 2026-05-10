@@ -9,6 +9,7 @@ include "cuda_tile_cpu/Dialect/CudaTileCPU/IR/Dialect.td"
 include "cuda_tile_cpu/Dialect/CudaTileCPU/IR/Types.td"
 
 include "cuda_tile/Dialect/CudaTile/IR/Types.td"
+include "cuda_tile/Dialect/CudaTile/IR/AttrDefs.td"
 
 
 class CudaTileCPU_Op<string mnemonic, list<Trait> traits = []> :
@@ -49,7 +50,8 @@ def CudaTileCPU_LoadMemRefTileOp : CudaTileCPU_Op<"load_memref_tile", [
   let summary = "Load a tensor tile from a structured memref";
 
   let arguments = (ins AnyRankedOrUnrankedMemRef:$source,
-                       Variadic<Index>:$offsets);
+                       Variadic<Index>:$offsets,
+                       OptionalAttr<CudaTile_PaddingValueAttr>:$padding_value);
   let results = (outs AnyRankedTensor:$result);
 
   let assemblyFormat = "$source `[` $offsets `]` attr-dict `:` type($source) `->` type($result)";

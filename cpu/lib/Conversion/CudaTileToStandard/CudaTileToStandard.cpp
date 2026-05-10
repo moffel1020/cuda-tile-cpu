@@ -1457,13 +1457,10 @@ struct LoadViewTkoPattern
       return failure();
     }
 
-    if (view.getPaddingValue() != nullptr) {
-      return failure(); // TODO: padding value support
-    }
-
     auto resTy = getTypeConverter()->convertType(op.getResult(0));
     auto newOp = cpu::LoadMemRefTileOp::create(rewriter, op.getLoc(), resTy,
-                                               adaptor.getView(), *offsets);
+                                               adaptor.getView(), *offsets,
+                                               view.getPaddingValue());
 
     rewriter.replaceOp(op, newOp);
     return success();

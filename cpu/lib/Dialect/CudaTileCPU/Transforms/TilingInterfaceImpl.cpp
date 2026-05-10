@@ -233,7 +233,8 @@ struct LoadMemRefTileOpTilingInterface
     auto tiledResultTy = RankedTensorType::get(getShapeFromTileSizes(sizes),
                                                resultTy.getElementType());
     auto tiledLoad = cpu::LoadMemRefTileOp::create(
-        b, loc, tiledResultTy, loadOp.getSource(), tiledOffsets);
+        b, loc, tiledResultTy, loadOp.getSource(), tiledOffsets,
+        loadOp.getPaddingValueAttr());
 
     return TilingResult{
         {tiledLoad.getOperation()}, {tiledLoad.getResult()}, {}};
