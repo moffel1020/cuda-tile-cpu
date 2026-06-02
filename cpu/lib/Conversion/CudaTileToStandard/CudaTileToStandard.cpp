@@ -1297,7 +1297,11 @@ struct ContinuePattern : public OpConversionPattern<cuda_tile::ContinueOp> {
       return failure();
     }
 
-    rewriter.replaceOpWithNewOp<scf::YieldOp>(op, adaptor.getOperands());
+    auto operands = llvm::filter_to_vector(adaptor.getOperands(), [](auto v) {
+      return !isa<cuda_tile::TokenType>(v.getType());
+    });
+
+    rewriter.replaceOpWithNewOp<scf::YieldOp>(op, operands);
     return success();
   }
 };
@@ -1308,22 +1312,43 @@ struct ForPattern : public OpConversionPattern<cuda_tile::ForOp> {
   LogicalResult
   matchAndRewrite(cuda_tile::ForOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+    SmallVector<Value> initValues;
+    SmallVector<uint32_t> droppedIndices;
+
+    for (auto [idx, init] : llvm::enumerate(adaptor.getInitValues())) {
+      if (isa<cuda_tile::TokenType>(init.getType())) {
+        droppedIndices.push_back(idx);
+        continue;
+      }
+      initValues.push_back(init);
+    }
+
     auto newOp = scf::ForOp::create(
         rewriter, op.getLoc(), adaptor.getLowerBound(), adaptor.getUpperBound(),
-        adaptor.getStep(), adaptor.getInitValues(), nullptr,
-        adaptor.getUnsignedCmp());
+        adaptor.getStep(), initValues, nullptr, adaptor.getUnsignedCmp());
 
-    rewriter.inlineRegionBefore(op.getRegion(), newOp.getRegion(),
-                                newOp.getRegion().end());
+
     // scf::ForOp::create already made an empty body, remove it
     rewriter.eraseBlock(newOp.getBody());
+
+    Region &newRegion = newOp.getRegion();
+    rewriter.inlineRegionBefore(op.getRegion(), newRegion, newRegion.end());
+    Block &body = newRegion.front();
+
+    // drop body args corresponding to token iter_args.
+    for (uint32_t idx : llvm::reverse(droppedIndices)) {
+      uint32_t argIndex = idx + 1; // +1 because body arg 0 is the loop iv
+      body.eraseArgument(argIndex);
+    }
 
     if (failed(rewriter.convertRegionTypes(&newOp.getRegion(),
                                            *getTypeConverter()))) {
       return failure();
     }
 
-    rewriter.replaceOp(op, newOp);
+    // replace only the non-token results
+    // TODO: this will probably fail when building LLVM with assertions
+    rewriter.replaceOp(op, newOp.getResults());
     return success();
   }
 };
@@ -1492,6 +1517,44 @@ struct StoreViewTkoPattern
   }
 };
 
+struct GetIndexSpaceShapePattern
+    : public OpConversionPattern<cuda_tile::GetIndexSpaceShapeOp> {
+  using OpConversionPattern<
+      cuda_tile::GetIndexSpaceShapeOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(cuda_tile::GetIndexSpaceShapeOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto view = dyn_cast<PartitionViewType>(op.getSrc().getType());
+    if (!view) {
+      // partition view is the only subview type in cuda tile 13.3
+      return failure();
+    }
+
+    auto values = view.getTileShape().asArrayRef();
+
+    SmallVector<Type> convertedTypes;
+    if (failed(getTypeConverter()->convertTypes(op.getResultTypes(),
+                                                convertedTypes))) {
+      return failure();
+    }
+
+    SmallVector<Value> replacements;
+    for (auto [v, type] : llvm::zip(values, convertedTypes)) {
+      if (!isa<IntegerType>(type)) {
+        return failure();
+      }
+      APInt apValue(type.getIntOrFloatBitWidth(), v, /*isSigned=*/true);
+      auto constOp = arith::ConstantOp::create(
+          rewriter, op.getLoc(), type, rewriter.getIntegerAttr(type, apValue));
+      replacements.push_back(constOp);
+    }
+
+    rewriter.replaceOp(op, replacements);
+    return success();
+  }
+};
+
 struct GetNumTileBlocksPattern
     : public OpConversionPattern<cuda_tile::GetNumTileBlocksOp> {
   using OpConversionPattern<cuda_tile::GetNumTileBlocksOp>::OpConversionPattern;
@@ -1603,13 +1666,14 @@ struct ConvertCudaTileToStandard
              AbsIPattern, FloorPattern, CeilPattern, AbsFPattern, Atan2Pattern,
              CoshPattern, CosPattern, ExpPattern, Log2Pattern, NegFPattern,
              SinhPattern, SinPattern, TanPattern, PowPattern, AddFPattern,
-             SubFPattern, DivFPattern, Exp2Pattern, FmaPattern, MaxFPattern,
-             MinFPattern, RsqrtPattern, SqrtPattern, SqrtPattern, TanHPattern,
-             RemFPattern, MmaFPattern, BitcastPattern, ExtiPattern, FToIPattern,
-             FToFPattern, IToFPattern, TruncIPattern, MmaIPattern, YieldPattern,
-             IfPattern, ForPattern, ContinuePattern, PrintTkoPattern,
-             LoadPtrTkoPattern, StorePtrTkoPattern, MakeTensorViewPattern,
-             MakePartitionViewPattern, LoadViewTkoPattern, StoreViewTkoPattern,
+             SubFPattern, MulFPattern, DivFPattern, Exp2Pattern, FmaPattern,
+             MaxFPattern, MinFPattern, RsqrtPattern, LogPattern, SqrtPattern,
+             SqrtPattern, TanHPattern, RemFPattern, MmaFPattern, BitcastPattern,
+             ExtiPattern, FToIPattern, FToFPattern, IToFPattern, TruncIPattern,
+             MmaIPattern, YieldPattern, IfPattern, ForPattern, ContinuePattern,
+             PrintTkoPattern, LoadPtrTkoPattern, StorePtrTkoPattern,
+             MakeTensorViewPattern, MakePartitionViewPattern,
+             LoadViewTkoPattern, StoreViewTkoPattern, GetIndexSpaceShapePattern,
              MakeTokenPattern, PtrToPtrPattern, PtrToIntPattern,
              IntToPtrPattern, GetTileBlockIdPattern, GetNumTileBlocksPattern,
              AssumePattern, MoveOutOfCudaTileModule>(typeConverter, context);
