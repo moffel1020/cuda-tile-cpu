@@ -22,7 +22,7 @@ def TileAndFuseIntoStorePass : Pass<
   let options = [
     ListOption<"tileSizes", "tile-sizes", "int64_t",
                "Tile sizes for store_ptr_tile iteration dimensions. If empty, "
-               "all dimensions use tile size 32.">
+               "all dimensions use tile size 1.">
   ];
 
   let dependentDialects = [
