@@ -182,8 +182,9 @@ struct StorePtrTileOpTilingInterface
                                 b, loc, mask, offsets, sizes, strides)
                           : nullptr;
 
+    Value maskValue = maskSlice == nullptr ? Value() : maskSlice.getResult();
     auto tiledStore =
-        cpu::StorePtrTileOp::create(b, loc, destSlice, valueSlice, maskSlice);
+        cpu::StorePtrTileOp::create(b, loc, destSlice, valueSlice, maskValue);
 
     if (maskSlice != nullptr) {
       return TilingResult{{tiledStore.getOperation()},
