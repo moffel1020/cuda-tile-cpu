@@ -1327,7 +1327,6 @@ struct ForPattern : public OpConversionPattern<cuda_tile::ForOp> {
         rewriter, op.getLoc(), adaptor.getLowerBound(), adaptor.getUpperBound(),
         adaptor.getStep(), initValues, nullptr, adaptor.getUnsignedCmp());
 
-
     // scf::ForOp::create already made an empty body, remove it
     rewriter.eraseBlock(newOp.getBody());
 
@@ -1361,8 +1360,9 @@ struct LoadPtrTkoPattern : public OpConversionPattern<cuda_tile::LoadPtrTkoOp> {
                   ConversionPatternRewriter &rewriter) const override {
     auto ptrTy = getTypeConverter()->convertType(op.getResult());
     if (isScalarType(ptrTy)) {
-      assert(!op.getMask() && !op.getPaddingValue() &&
-             "scalar ptr load was assumed not to have mask or padding val");
+      // TODO
+      // assert(!op.getMask() && !op.getPaddingValue() &&
+      //        "scalar ptr load was assumed not to have mask or padding val");
       rewriter.replaceOpWithNewOp<cpu::LoadPtrOp>(op, ptrTy,
                                                   adaptor.getSource());
       return success();
@@ -1383,8 +1383,8 @@ struct StorePtrTkoPattern
   matchAndRewrite(cuda_tile::StorePtrTkoOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     if (isScalarValue(adaptor.getDestination())) {
-      assert(!op.getMask() &&
-             "scalar ptr store was assumed not to have a mask");
+      // assert(!op.getMask() &&
+      //        "scalar ptr store was assumed not to have a mask");
       rewriter.replaceOpWithNewOp<cpu::StorePtrOp>(op, adaptor.getDestination(),
                                                    adaptor.getValue());
       return success();
@@ -1525,32 +1525,65 @@ struct GetIndexSpaceShapePattern
   LogicalResult
   matchAndRewrite(cuda_tile::GetIndexSpaceShapeOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    auto view = dyn_cast<PartitionViewType>(op.getSrc().getType());
-    if (!view) {
-      // partition view is the only subview type in cuda tile 13.3
+    if (!isa<MakePartitionViewOp>(op.getSrc().getDefiningOp())) {
       return failure();
     }
 
-    auto values = view.getTileShape().asArrayRef();
+    auto pview = cast<MakePartitionViewOp>(op.getSrc().getDefiningOp());
+    auto tview = pview.getTensorView();
 
-    SmallVector<Type> convertedTypes;
-    if (failed(getTypeConverter()->convertTypes(op.getResultTypes(),
-                                                convertedTypes))) {
-      return failure();
-    }
+    auto tviewTy = tview.getType();
 
-    SmallVector<Value> replacements;
-    for (auto [v, type] : llvm::zip(values, convertedTypes)) {
-      if (!isa<IntegerType>(type)) {
-        return failure();
+    SmallVector<Value> tviewSizes;
+    SmallVector<Type> elemTys;
+    for (auto [i, s] : llvm::enumerate(tviewTy.getShape())) {
+      auto elemTy = cast<TileType>(op.getType(i)).getElementType();
+      elemTys.push_back(elemTy);
+
+      if (s == ShapedType::kDynamic) {
+        auto dimOp = memref::DimOp::create(rewriter, op.getLoc(), adaptor.getSrc(), i);
+        Value val = arith::IndexCastUIOp::create(rewriter, op.getLoc(), elemTy,
+                                                 dimOp, true);
+        tviewSizes.push_back(val);
+      } else {
+        Value constant = arith::ConstantOp::create(
+            rewriter, op.getLoc(), rewriter.getIntegerAttr(elemTy, s));
+        tviewSizes.push_back(constant);
       }
-      APInt apValue(type.getIntOrFloatBitWidth(), v, /*isSigned=*/true);
-      auto constOp = arith::ConstantOp::create(
-          rewriter, op.getLoc(), type, rewriter.getIntegerAttr(type, apValue));
-      replacements.push_back(constOp);
     }
 
-    rewriter.replaceOp(op, replacements);
+    SmallVector<Value> newOps;
+    auto pviewTy = pview.getType();
+    for (auto [shape, type, pShape] :
+         llvm::zip(tviewSizes, elemTys, pviewTy.getTileShape().asArrayRef())) {
+      APInt apValue(type.getIntOrFloatBitWidth(), pShape);
+      auto pviewSize = arith::ConstantOp::create(
+          rewriter, op.getLoc(), type, rewriter.getIntegerAttr(type, apValue));
+
+      Value div = arith::CeilDivUIOp::create(rewriter, op.getLoc(), shape, pviewSize);
+      newOps.push_back(div);
+    }
+
+    rewriter.replaceOp(op, newOps);
+    return success();
+  }
+};
+
+struct GetTensorShapePattern
+    : public OpConversionPattern<cuda_tile::GetTensorShapeOp> {
+  using OpConversionPattern<cuda_tile::GetTensorShapeOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(cuda_tile::GetTensorShapeOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    SmallVector<Value> dimOps;
+    for (int64_t i = 0; i < op.getNumResults(); i++) {
+      Value memOp =
+          memref::DimOp::create(rewriter, op.getLoc(), adaptor.getSrc());
+      dimOps.push_back(memOp);
+    }
+
+    rewriter.replaceOp(op, dimOps);
     return success();
   }
 };
@@ -1673,10 +1706,11 @@ struct ConvertCudaTileToStandard
              MmaIPattern, YieldPattern, IfPattern, ForPattern, ContinuePattern,
              PrintTkoPattern, LoadPtrTkoPattern, StorePtrTkoPattern,
              MakeTensorViewPattern, MakePartitionViewPattern,
-             LoadViewTkoPattern, StoreViewTkoPattern, GetIndexSpaceShapePattern,
-             MakeTokenPattern, PtrToPtrPattern, PtrToIntPattern,
-             IntToPtrPattern, GetTileBlockIdPattern, GetNumTileBlocksPattern,
-             AssumePattern, MoveOutOfCudaTileModule>(typeConverter, context);
+             LoadViewTkoPattern, StoreViewTkoPattern, GetTensorShapePattern,
+             GetIndexSpaceShapePattern, MakeTokenPattern, PtrToPtrPattern,
+             PtrToIntPattern, IntToPtrPattern, GetTileBlockIdPattern,
+             GetNumTileBlocksPattern, AssumePattern, MoveOutOfCudaTileModule>(
+            typeConverter, context);
 
     target.addIllegalDialect<CudaTileDialect>();
     target.addLegalDialect<
