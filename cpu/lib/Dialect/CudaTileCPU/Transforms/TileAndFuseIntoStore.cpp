@@ -26,7 +26,8 @@ namespace {
 
 static SmallVector<OpFoldResult>
 getTileSizesForStore(OpBuilder &b, TilingInterface storeOp,
-                     ArrayRef<int64_t> requestedSizes) {
+                     ArrayRef<int64_t> requestedSizes,
+                     ArrayRef<int64_t> opStaticSizes) {
   const int64_t defaultTileSize = 1;
 
   SmallVector<Range> domain = storeOp.getIterationDomain(b);
@@ -37,10 +38,17 @@ getTileSizesForStore(OpBuilder &b, TilingInterface storeOp,
     auto reqStart = static_cast<int64_t>(domain.size()) -
                     static_cast<int64_t>(requestedSizes.size());
     if (static_cast<int64_t>(i) >= reqStart) {
-      tileSizeOfrs.push_back(b.getIndexAttr(requestedSizes[i - reqStart]));
+      tileSizeOfrs.push_back(b.getIndexAttr(
+          std::min(requestedSizes[i - reqStart], opStaticSizes[i])));
     } else {
-      tileSizeOfrs.push_back(b.getIndexAttr(defaultTileSize));
+      tileSizeOfrs.push_back(
+          b.getIndexAttr(std::min(defaultTileSize, opStaticSizes[i])));
     }
+  }
+
+  llvm::errs() << "size: " << tileSizeOfrs.size() << "\n";
+  for (auto s : tileSizeOfrs) {
+    llvm::errs() << s << "\n";
   }
 
   return tileSizeOfrs;
@@ -81,8 +89,19 @@ static void fuseProducersGreedily(IRRewriter &rewriter,
   }
 }
 
-static bool shouldTileAndFuseProducersOfOp(Operation *op) {
-  return isa<cpu::StorePtrTileOp, cpu::StoreMemRefTileOp>(op);
+static std::optional<ArrayRef<int64_t>>
+getStaticShapeOfTileableOp(Operation *op) {
+  auto storePtr = dyn_cast<cpu::StorePtrTileOp>(op);
+  if (storePtr && storePtr.getValue().getType().hasStaticShape()) {
+    return storePtr.getValue().getType().getShape();
+  }
+
+  auto storeTile = dyn_cast<cpu::StoreMemRefTileOp>(op);
+  if (storeTile && storeTile.getValue().getType().hasStaticShape()) {
+    return storeTile.getValue().getType().getShape();
+  }
+
+  return std::nullopt;
 }
 
 struct TileAndFuseIntoStorePass
@@ -96,13 +115,15 @@ struct TileAndFuseIntoStorePass
     IRRewriter rewriter(context);
 
     SmallVector<Operation *> sinkOps;
+    SmallVector<ArrayRef<int64_t>> sinkStaticShapes;
     mod.walk([&](Operation *op) {
-      if (shouldTileAndFuseProducersOfOp(op)) {
+      if (auto shape = getStaticShapeOfTileableOp(op)) {
         sinkOps.push_back(op);
+        sinkStaticShapes.push_back(*shape);
       }
     });
 
-    for (Operation *op : sinkOps) {
+    for (auto [op, staticShape] : llvm::zip(sinkOps, sinkStaticShapes)) {
       if (!op->getBlock()) {
         continue;
       }
@@ -116,7 +137,7 @@ struct TileAndFuseIntoStorePass
 
       rewriter.setInsertionPoint(op);
       SmallVector<OpFoldResult> tileSizeOfrs =
-          getTileSizesForStore(rewriter, tileableOp, tileSizes);
+          getTileSizesForStore(rewriter, tileableOp, tileSizes, staticShape);
 
       scf::SCFTilingOptions tilingOptions;
       tilingOptions.setLoopType(scf::SCFTilingOptions::LoopType::ForOp)
