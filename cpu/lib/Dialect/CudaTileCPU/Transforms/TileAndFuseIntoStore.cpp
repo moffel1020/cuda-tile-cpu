@@ -46,11 +46,6 @@ getTileSizesForStore(OpBuilder &b, TilingInterface storeOp,
     }
   }
 
-  llvm::errs() << "size: " << tileSizeOfrs.size() << "\n";
-  for (auto s : tileSizeOfrs) {
-    llvm::errs() << s << "\n";
-  }
-
   return tileSizeOfrs;
 }
 
