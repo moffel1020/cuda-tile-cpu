@@ -15,6 +15,8 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
 
+#include "llvm/ADT/APFloat.h"
+
 #include <memory>
 
 namespace mlir {
@@ -593,6 +595,53 @@ struct ConvertElementwise : public OpConversionPattern<T> {
   }
 };
 
+static FailureOr<cuda_tile::ConstantOp>
+getConstantFromReshapeBroadcastChain(Value value) {
+  while (true) {
+    if (auto constant = value.getDefiningOp<cuda_tile::ConstantOp>()) {
+      return constant;
+    } else if (auto broadcast = value.getDefiningOp<cuda_tile::BroadcastOp>()) {
+      value = broadcast.getSource();
+    } else if (auto reshape = value.getDefiningOp<cuda_tile::ReshapeOp>()) {
+      value = reshape.getSource();
+    } else {
+      return failure();
+    }
+  }
+}
+
+static bool isTileConstantAndEqualTo(Value value, double expected) {
+  auto constant = getConstantFromReshapeBroadcastChain(value);
+  if (failed(constant)) {
+    return false;
+  }
+
+  auto attr = dyn_cast<DenseFPElementsAttr>(constant->getValue());
+  if (!attr || !attr.isSplat()) {
+    return false;
+  }
+
+  return attr.getSplatValue<APFloat>().isExactlyValue(expected);
+}
+
+struct PowPattern : public OpConversionPattern<cuda_tile::PowOp> {
+  using OpConversionPattern<cuda_tile::PowOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(cuda_tile::PowOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (isTileConstantAndEqualTo(op.getExponent(), 2.0)) {
+      rewriter.replaceOpWithNewOp<arith::MulFOp>(op, adaptor.getSource(),
+                                                 adaptor.getSource());
+      return success();
+    }
+
+    rewriter.replaceOpWithNewOp<math::PowFOp>(op, adaptor.getSource(),
+                                              adaptor.getExponent());
+    return success();
+  }
+};
+
 template <typename T, typename SignedOp, typename UnsignedMapOp>
 struct MaxIMinIPattern : public OpConversionPattern<T> {
   using OpConversionPattern<T>::OpConversionPattern;
@@ -1103,8 +1152,6 @@ using NegFPattern = ConvertElementwise<cuda_tile::NegFOp, arith::NegFOp>;
 using SinhPattern = ConvertElementwise<cuda_tile::SinHOp, math::SinhOp>;
 using SinPattern = ConvertElementwise<cuda_tile::SinOp, math::SinOp>;
 using TanPattern = ConvertElementwise<cuda_tile::TanOp, math::TanOp>;
-// TODO: specialize to square for pow 2
-using PowPattern = ConvertElementwise<cuda_tile::PowOp, math::PowFOp>;
 using AddFPattern =
     ConvertElementwise<cuda_tile::AddFOp,
                        arith::AddFOp>; // ignore rounding and ftz
@@ -1541,7 +1588,8 @@ struct GetIndexSpaceShapePattern
       elemTys.push_back(elemTy);
 
       if (s == ShapedType::kDynamic) {
-        auto dimOp = memref::DimOp::create(rewriter, op.getLoc(), adaptor.getSrc(), i);
+        auto dimOp =
+            memref::DimOp::create(rewriter, op.getLoc(), adaptor.getSrc(), i);
         Value val = arith::IndexCastUIOp::create(rewriter, op.getLoc(), elemTy,
                                                  dimOp, true);
         tviewSizes.push_back(val);
@@ -1560,7 +1608,8 @@ struct GetIndexSpaceShapePattern
       auto pviewSize = arith::ConstantOp::create(
           rewriter, op.getLoc(), type, rewriter.getIntegerAttr(type, apValue));
 
-      Value div = arith::CeilDivUIOp::create(rewriter, op.getLoc(), shape, pviewSize);
+      Value div =
+          arith::CeilDivUIOp::create(rewriter, op.getLoc(), shape, pviewSize);
       newOps.push_back(div);
     }
 
