@@ -13,9 +13,12 @@
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/UB/IR/UBOps.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
+#include "mlir/Dialect/Vector/Transforms/VectorRewritePatterns.h"
+#include "mlir/Dialect/Vector/Transforms/VectorTransforms.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
+#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
 #include <memory>
 
@@ -449,6 +452,18 @@ struct LowerCudaTileCPUMemOps
       signalPassFailure();
       return;
     }
+
+    RewritePatternSet cleanupPatterns(context);
+    vector::populateCastAwayVectorLeadingOneDimPatterns(cleanupPatterns);
+    vector::populateDropUnitDimWithShapeCastPatterns(cleanupPatterns);
+
+    if (failed(applyPatternsGreedily(mod, std::move(cleanupPatterns)))) {
+      signalPassFailure();
+      return;
+    }
+
+    IRRewriter rewriter(context);
+    vector::transferOpflowOpt(rewriter, mod);
   }
 };
 

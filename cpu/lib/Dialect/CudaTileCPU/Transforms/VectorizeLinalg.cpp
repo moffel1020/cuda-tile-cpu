@@ -4,6 +4,7 @@
 #include "mlir/Dialect/Linalg/Transforms/Transforms.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
+#include "mlir/Dialect/Vector/Transforms/VectorRewritePatterns.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
@@ -62,6 +63,8 @@ struct VectorizeLinalgPass
     RewritePatternSet patterns(&getContext());
     patterns.add<VectorizeLinalgOpPattern>(&getContext(), vectorizeNDExtract,
                                            flatten1DDepthwiseConv);
+    vector::populateCastAwayVectorLeadingOneDimPatterns(patterns);
+    vector::populateDropUnitDimWithShapeCastPatterns(patterns);
 
     GreedyRewriteConfig config;
     config.setUseTopDownTraversal();

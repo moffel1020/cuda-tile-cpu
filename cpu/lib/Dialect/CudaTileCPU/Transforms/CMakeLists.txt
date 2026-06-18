@@ -14,6 +14,7 @@ add_mlir_dialect_library(CudaTileCPUTransforms
   MLIRSCFTransforms
   MLIRTensorDialect
   MLIRTransforms
+  MLIRVectorTransforms
 
   LINK_COMPONENTS
   Support
