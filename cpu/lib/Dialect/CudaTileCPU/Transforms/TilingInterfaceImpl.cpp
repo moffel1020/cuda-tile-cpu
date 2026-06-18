@@ -90,18 +90,21 @@ struct LoadPtrTileOpTilingInterface
     auto maskSlice = mask ? tensor::ExtractSliceOp::create(
                                 b, loc, mask, offsets, sizes, strides)
                           : nullptr;
+    Value maskValue = maskSlice == nullptr ? Value() : maskSlice.getResult();
 
     auto padding = loadOp.getPaddingValue();
     auto paddingSlice = padding ? tensor::ExtractSliceOp::create(
                                       b, loc, padding, offsets, sizes, strides)
                                 : nullptr;
+    Value paddingValue =
+        paddingSlice == nullptr ? Value() : paddingSlice.getResult();
 
     auto slicedShape = sourceSlice.getType().getShape();
     auto slicedResTy =
         RankedTensorType::get(slicedShape, resTy.getElementType());
 
     auto tiledLoad = cpu::LoadPtrTileOp::create(
-        b, loc, slicedResTy, sourceSlice, maskSlice, paddingSlice);
+        b, loc, slicedResTy, sourceSlice, maskValue, paddingValue);
 
     auto tilingResult = TilingResult{{tiledLoad.getOperation()},
                                      {tiledLoad.getResult()},
