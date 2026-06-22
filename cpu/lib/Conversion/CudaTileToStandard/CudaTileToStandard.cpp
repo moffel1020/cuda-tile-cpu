@@ -18,6 +18,7 @@
 #include "llvm/ADT/APFloat.h"
 
 #include <memory>
+#include <numeric>
 
 namespace mlir {
 namespace cuda_tile {
@@ -388,17 +389,31 @@ struct ReshapePattern : public OpConversionPattern<cuda_tile::ReshapeOp> {
       return success();
     }
 
-    auto shapeType =
-        RankedTensorType::get({tensorType.getRank()}, rewriter.getIndexType());
-    SmallVector<APInt> values =
-        llvm::map_to_vector(tensorType.getShape(), [](int64_t val) {
-          return APInt{64, (uint64_t)val};
-        });
+    auto sourceType = cast<RankedTensorType>(source.getType());
+    if (sourceType == tensorType) {
+      rewriter.replaceOp(op, source);
+      return success();
+    }
 
-    auto attr = DenseElementsAttr::get(shapeType, values);
-    auto shape = arith::ConstantOp::create(rewriter, op.getLoc(), attr);
-    rewriter.replaceOpWithNewOp<tensor::ReshapeOp>(op, tensorType, source,
-                                                   shape);
+    // first flatten and then expand
+    Value flat = source;
+    if (sourceType.getRank() > 1) {
+      ReassociationIndices sourceDims(sourceType.getRank());
+      std::iota(sourceDims.begin(), sourceDims.end(), 0);
+      flat = tensor::CollapseShapeOp::create(
+          rewriter, op.getLoc(), source,
+          ArrayRef<ReassociationIndices>{sourceDims});
+    }
+
+    if (tensorType.getRank() == 1) {
+      rewriter.replaceOp(op, flat);
+      return success();
+    }
+
+    ReassociationIndices resultDims(tensorType.getRank());
+    std::iota(resultDims.begin(), resultDims.end(), 0);
+    rewriter.replaceOpWithNewOp<tensor::ExpandShapeOp>(
+        op, tensorType, flat, ArrayRef<ReassociationIndices>{resultDims});
     return success();
   }
 };
