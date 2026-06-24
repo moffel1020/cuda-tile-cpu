@@ -309,7 +309,6 @@ struct OffsetPattern : public OpConversionPattern<cuda_tile::OffsetOp> {
     return success();
   }
 };
-
 struct BroadcastPattern : public OpConversionPattern<cuda_tile::BroadcastOp> {
   using OpConversionPattern<cuda_tile::BroadcastOp>::OpConversionPattern;
 
@@ -320,6 +319,16 @@ struct BroadcastPattern : public OpConversionPattern<cuda_tile::BroadcastOp> {
     auto opTy = op.getType();
     auto rank = opTy.getRank();
     auto newTy = cast<RankedTensorType>(getTypeConverter()->convertType(opTy));
+
+    if (Value originalScalar = findScalarThroughReshapes(op.getSource())) {
+      Value scalar = rewriter.getRemappedValue(originalScalar);
+      if (!scalar) {
+        return failure();
+      }
+      rewriter.replaceOp(
+          op, createTensorSplat(rewriter, op.getLoc(), scalar, newTy));
+      return success();
+    }
 
     if (isScalarValue(adaptor.getSource())) {
       rewriter.replaceOp(op, createTensorSplat(rewriter, op.getLoc(),
@@ -351,6 +360,15 @@ struct BroadcastPattern : public OpConversionPattern<cuda_tile::BroadcastOp> {
   }
 
 private:
+  static Value findScalarThroughReshapes(Value value) {
+    while (auto reshape = value.getDefiningOp<cuda_tile::ReshapeOp>()) {
+      value = reshape.getSource();
+    }
+
+    auto type = dyn_cast<cuda_tile::TileType>(value.getType());
+    return type && type.getRank() == 0 ? value : Value{};
+  }
+
   static AffineMap getBroadcastInputMap(ArrayRef<int64_t> input,
                                         int64_t outputRank, MLIRContext *ctx) {
     SmallVector<AffineExpr> exprs;
