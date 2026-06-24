@@ -1486,6 +1486,23 @@ struct StorePtrTkoPattern
       return success();
     }
 
+    if (auto offset =
+            op.getDestination().getDefiningOp<cuda_tile::OffsetOp>()) {
+      Value originalBase = findScalarPointer(offset.getPtr());
+      if (originalBase) {
+        Value base = rewriter.getRemappedValue(originalBase);
+        Value offsets = rewriter.getRemappedValue(offset.getOffset());
+        if (!base || !offsets) {
+          return rewriter.notifyMatchFailure(
+              op, "scatter base or offsets could not be remapped");
+        }
+
+        rewriter.replaceOpWithNewOp<cpu::ScatterTileOp>(
+            op, base, offsets, adaptor.getValue(), adaptor.getMask());
+        return success();
+      }
+    }
+
     rewriter.replaceOpWithNewOp<cpu::StorePtrTileOp>(
         op, adaptor.getDestination(), adaptor.getValue(), adaptor.getMask());
     return success();

@@ -279,6 +279,61 @@ struct StorePtrTileOpTilingInterface
   }
 };
 
+struct ScatterTileOpTilingInterface
+    : public TilingInterface::ExternalModel<ScatterTileOpTilingInterface,
+                                            cpu::ScatterTileOp> {
+  SmallVector<utils::IteratorType> getLoopIteratorTypes(Operation *op) const {
+    auto scatterOp = cast<cpu::ScatterTileOp>(op);
+    auto valueTy = scatterOp.getValue().getType();
+    return SmallVector<utils::IteratorType>(valueTy.getRank(),
+                                            utils::IteratorType::parallel);
+  }
+
+  SmallVector<Range> getIterationDomain(Operation *op, OpBuilder &b) const {
+    auto scatterOp = cast<cpu::ScatterTileOp>(op);
+    return getStaticShapeIterationDomain(
+        b, scatterOp.getValue().getType().getShape());
+  }
+
+  FailureOr<TilingResult>
+  getTiledImplementation(Operation *op, OpBuilder &b,
+                         ArrayRef<OpFoldResult> offsets,
+                         ArrayRef<OpFoldResult> sizes) const {
+    auto scatterOp = cast<cpu::ScatterTileOp>(op);
+    auto valueTy = scatterOp.getValue().getType();
+    Location loc = scatterOp.getLoc();
+
+    if (offsets.size() != static_cast<size_t>(valueTy.getRank()) ||
+        sizes.size() != static_cast<size_t>(valueTy.getRank())) {
+      return failure();
+    }
+
+    SmallVector<OpFoldResult> strides(valueTy.getRank(), b.getIndexAttr(1));
+    SmallVector<Operation *> generatedSlices;
+
+    auto offsetsSlice = tensor::ExtractSliceOp::create(
+        b, loc, scatterOp.getOffsets(), offsets, sizes, strides);
+    generatedSlices.push_back(offsetsSlice);
+
+    auto valueSlice = tensor::ExtractSliceOp::create(
+        b, loc, scatterOp.getValue(), offsets, sizes, strides);
+    generatedSlices.push_back(valueSlice);
+
+    Value mask;
+    if (scatterOp.getMask()) {
+      auto maskSlice = tensor::ExtractSliceOp::create(
+          b, loc, scatterOp.getMask(), offsets, sizes, strides);
+      mask = maskSlice;
+      generatedSlices.push_back(maskSlice);
+    }
+
+    auto tiledScatter = cpu::ScatterTileOp::create(
+        b, loc, scatterOp.getBase(), offsetsSlice, valueSlice, mask);
+
+    return TilingResult{{tiledScatter.getOperation()}, {}, generatedSlices};
+  }
+};
+
 struct LoadMemRefTileOpTilingInterface
     : public TilingInterface::ExternalModel<LoadMemRefTileOpTilingInterface,
                                             cpu::LoadMemRefTileOp> {
@@ -397,6 +452,7 @@ void registerTilingInterfaceExternalModels(DialectRegistry &registry) {
     LoadPtrTileOp::attachInterface<LoadPtrTileOpTilingInterface>(*ctx);
     GatherTileOp::attachInterface<GatherTileOpTilingInterface>(*ctx);
     StorePtrTileOp::attachInterface<StorePtrTileOpTilingInterface>(*ctx);
+    ScatterTileOp::attachInterface<ScatterTileOpTilingInterface>(*ctx);
     LoadMemRefTileOp::attachInterface<LoadMemRefTileOpTilingInterface>(*ctx);
     StoreMemRefTileOp::attachInterface<StoreMemRefTileOpTilingInterface>(*ctx);
   });

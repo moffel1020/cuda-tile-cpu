@@ -121,6 +121,51 @@ struct GatherTilePattern : public OpConversionPattern<cpu::GatherTileOp> {
   }
 };
 
+struct ScatterTilePattern : public OpConversionPattern<cpu::ScatterTileOp> {
+  using OpConversionPattern<cpu::ScatterTileOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(cpu::ScatterTileOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    auto valueType = op.getValue().getType();
+    auto offsetsType = op.getOffsets().getType();
+    int64_t numElements = valueType.getNumElements();
+
+    Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+    SmallVector<Value> zeroIndices(valueType.getRank(), zero);
+
+    Value mask;
+    if (op.getMask()) {
+      mask = readTensorAndCastTo1dVector(rewriter, loc, op.getMask(),
+                                         op.getMask().getType(), zeroIndices);
+    } else {
+      auto maskType = VectorType::get({numElements}, rewriter.getI1Type());
+      auto trueSplat =
+          DenseElementsAttr::get(maskType, rewriter.getBoolAttr(true));
+      mask = arith::ConstantOp::create(rewriter, loc, maskType, trueSplat);
+    }
+
+    auto baseType =
+        MemRefType::get({ShapedType::kDynamic}, valueType.getElementType());
+    Value baseSize = arith::ConstantIndexOp::create(rewriter, loc, numElements);
+    Value base =
+        cpu::MakeMemRefOp::create(rewriter, loc, baseType, op.getBase(),
+                                  ValueRange{baseSize}, ValueRange{});
+
+    Value indices = readTensorAndCastTo1dVector(rewriter, loc, op.getOffsets(),
+                                                offsetsType, zeroIndices);
+    Value value = readTensorAndCastTo1dVector(rewriter, loc, op.getValue(),
+                                              valueType, zeroIndices);
+
+    auto scatter =
+        vector::ScatterOp::create(rewriter, loc, /*resultType=*/nullptr, base,
+                                  ValueRange{zero}, indices, mask, value);
+    rewriter.replaceOp(op, scatter.getResults());
+    return success();
+  }
+};
+
 // innerBodyBuilder must always create a yield op of the innermost loop.
 // if useInnerIterArg is set to to true, that yield must return a result.
 // the result is propagated to the outermost loop
@@ -495,12 +540,13 @@ struct LowerCudaTileCPUMemOps
 
     ConversionTarget target(*context);
     RewritePatternSet patterns(context);
-    patterns.add<GatherTilePattern, LoadPtrTilePattern, StorePtrTilePattern,
-                 LoadMemRefTilePattern, StoreMemRefTilePattern>(context);
+    patterns.add<GatherTilePattern, ScatterTilePattern, LoadPtrTilePattern,
+                 StorePtrTilePattern, LoadMemRefTilePattern,
+                 StoreMemRefTilePattern>(context);
 
-    target.addIllegalOp<cpu::GatherTileOp, cpu::LoadPtrTileOp,
-                        cpu::StorePtrTileOp, cpu::LoadMemRefTileOp,
-                        cpu::StoreMemRefTileOp>();
+    target.addIllegalOp<cpu::GatherTileOp, cpu::ScatterTileOp,
+                        cpu::LoadPtrTileOp, cpu::StorePtrTileOp,
+                        cpu::LoadMemRefTileOp, cpu::StoreMemRefTileOp>();
 
     target.addLegalDialect<
         ub::UBDialect, arith::ArithDialect, affine::AffineDialect,

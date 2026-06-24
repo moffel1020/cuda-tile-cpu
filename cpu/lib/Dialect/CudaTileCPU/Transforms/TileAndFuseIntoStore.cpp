@@ -2,10 +2,15 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/SCF/Transforms/TileUsingInterface.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/Utils/StaticValueUtils.h"
+#include "mlir/IR/Dominance.h"
 #include "mlir/IR/PatternMatch.h"
+#include "mlir/Interfaces/DestinationStyleOpInterface.h"
 #include "mlir/Interfaces/TilingInterface.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+
+#include <deque>
 
 namespace mlir {
 namespace cuda_tile {
@@ -49,9 +54,8 @@ getTileSizesForStore(OpBuilder &b, TilingInterface storeOp,
   return tileSizeOfrs;
 }
 
-static void
-appendGeneratedSlices(SmallVectorImpl<tensor::ExtractSliceOp> &worklist,
-                      ArrayRef<Operation *> generatedSlices) {
+static void appendGeneratedSlices(std::deque<tensor::ExtractSliceOp> &worklist,
+                                  ArrayRef<Operation *> generatedSlices) {
   for (Operation *slice : generatedSlices) {
     if (auto extractSlice = dyn_cast_or_null<tensor::ExtractSliceOp>(slice)) {
       worklist.push_back(extractSlice);
@@ -59,23 +63,101 @@ appendGeneratedSlices(SmallVectorImpl<tensor::ExtractSliceOp> &worklist,
   }
 }
 
+static bool hasNonDestinationUse(tensor::ExtractSliceOp slice) {
+  return llvm::any_of(slice->getUses(), [](OpOperand &use) {
+    auto destinationStyleOp =
+        dyn_cast<DestinationStyleOpInterface>(use.getOwner());
+    return !destinationStyleOp || !destinationStyleOp.isDpsInit(&use);
+  });
+}
+
+struct FusedSlice {
+  Value source;
+  SmallVector<OpFoldResult> offsets;
+  SmallVector<OpFoldResult> sizes;
+  SmallVector<OpFoldResult> strides;
+  Value tiledValue;
+};
+
+static Value findFusedSlice(const DominanceInfo &dominanceInfo,
+                            ArrayRef<FusedSlice> fusedSlices,
+                            tensor::ExtractSliceOp candidate) {
+  for (const FusedSlice &fused : fusedSlices) {
+    if (fused.source == candidate.getSource() &&
+        dominanceInfo.dominates(fused.tiledValue, candidate) &&
+        isEqualConstantIntOrValueArray(fused.offsets,
+                                       candidate.getMixedOffsets()) &&
+        isEqualConstantIntOrValueArray(fused.sizes,
+                                       candidate.getMixedSizes()) &&
+        isEqualConstantIntOrValueArray(fused.strides,
+                                       candidate.getMixedStrides())) {
+      return fused.tiledValue;
+    }
+  }
+  return {};
+}
+
+static tensor::ExtractSliceOp
+popFirstInProgramOrder(std::deque<tensor::ExtractSliceOp> &worklist,
+                       const DominanceInfo &dominanceInfo) {
+  auto first = worklist.begin();
+  for (auto it = std::next(worklist.begin()); it != worklist.end(); ++it) {
+    if (dominanceInfo.properlyDominates(it->getOperation(),
+                                        first->getOperation())) {
+      first = it;
+    }
+  }
+
+  tensor::ExtractSliceOp result = *first;
+  worklist.erase(first);
+  return result;
+}
+
 static void fuseProducersGreedily(IRRewriter &rewriter,
                                   SmallVector<LoopLikeOpInterface> &loops,
                                   ArrayRef<Operation *> initialSlices) {
-  SmallVector<tensor::ExtractSliceOp> worklist;
+  std::deque<tensor::ExtractSliceOp> worklist;
+  SmallVector<FusedSlice> fusedSlices;
+  DominanceInfo dominanceInfo;
   appendGeneratedSlices(worklist, initialSlices);
 
   while (!worklist.empty()) {
-    tensor::ExtractSliceOp candidateSlice = worklist.pop_back_val();
+    tensor::ExtractSliceOp candidateSlice =
+        popFirstInProgramOrder(worklist, dominanceInfo);
     if (!candidateSlice || candidateSlice.use_empty()) {
       continue;
     }
+
+    // Tiling a destination-style op creates slices for both its inputs and
+    // inits. Elementwise-to-linalg commonly aliases the first input and the
+    // init, so recursively fusing both paths duplicates the producer graph at
+    // every step. Keep destination-only slices as the tiled op's init and fuse
+    // through data inputs only.
+    if (!hasNonDestinationUse(candidateSlice)) {
+      continue;
+    }
+
+    if (Value tiledValue =
+            findFusedSlice(dominanceInfo, fusedSlices, candidateSlice)) {
+      rewriter.replaceAllUsesWith(candidateSlice, tiledValue);
+      rewriter.eraseOp(candidateSlice);
+      continue;
+    }
+
+    FusedSlice fusedSlice{candidateSlice.getSource(),
+                          candidateSlice.getMixedOffsets(),
+                          candidateSlice.getMixedSizes(),
+                          candidateSlice.getMixedStrides(),
+                          {}};
 
     std::optional<scf::SCFFuseProducerOfSliceResult> fusedResult =
         scf::tileAndFuseProducerOfSlice(rewriter, candidateSlice, loops);
     if (!fusedResult) {
       continue;
     }
+
+    fusedSlice.tiledValue = fusedResult->tiledAndFusedProducer;
+    fusedSlices.push_back(std::move(fusedSlice));
 
     appendGeneratedSlices(worklist, fusedResult->generatedSlices);
     if (candidateSlice.use_empty()) {
@@ -94,6 +176,11 @@ getStaticShapeOfTileableOp(Operation *op) {
   auto storeTile = dyn_cast<cpu::StoreMemRefTileOp>(op);
   if (storeTile && storeTile.getValue().getType().hasStaticShape()) {
     return storeTile.getValue().getType().getShape();
+  }
+
+  auto scatterTile = dyn_cast<cpu::ScatterTileOp>(op);
+  if (scatterTile && scatterTile.getValue().getType().hasStaticShape()) {
+    return scatterTile.getValue().getType().getShape();
   }
 
   return std::nullopt;
