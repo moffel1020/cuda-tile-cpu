@@ -142,6 +142,82 @@ struct LoadPtrTileOpTilingInterface
   }
 };
 
+struct GatherTileOpTilingInterface
+    : public TilingInterface::ExternalModel<GatherTileOpTilingInterface,
+                                            cpu::GatherTileOp> {
+  SmallVector<utils::IteratorType> getLoopIteratorTypes(Operation *op) const {
+    auto gatherOp = cast<cpu::GatherTileOp>(op);
+    return SmallVector<utils::IteratorType>(gatherOp.getType().getRank(),
+                                            utils::IteratorType::parallel);
+  }
+
+  SmallVector<Range> getIterationDomain(Operation *op, OpBuilder &b) const {
+    auto gatherOp = cast<cpu::GatherTileOp>(op);
+    return getStaticShapeIterationDomain(b, gatherOp.getType().getShape());
+  }
+
+  FailureOr<TilingResult>
+  getTiledImplementation(Operation *op, OpBuilder &b,
+                         ArrayRef<OpFoldResult> offsets,
+                         ArrayRef<OpFoldResult> sizes) const {
+    auto gatherOp = cast<cpu::GatherTileOp>(op);
+    Location loc = gatherOp.getLoc();
+    SmallVector<OpFoldResult> strides(gatherOp.getType().getRank(),
+                                      b.getIndexAttr(1));
+    SmallVector<Operation *> generatedSlices;
+
+    auto offsetsSlice = tensor::ExtractSliceOp::create(
+        b, loc, gatherOp.getOffsets(), offsets, sizes, strides);
+    generatedSlices.push_back(offsetsSlice);
+
+    Value mask;
+    if (gatherOp.getMask()) {
+      auto maskSlice = tensor::ExtractSliceOp::create(
+          b, loc, gatherOp.getMask(), offsets, sizes, strides);
+      mask = maskSlice;
+      generatedSlices.push_back(maskSlice);
+    }
+
+    Value padding;
+    if (gatherOp.getPaddingValue()) {
+      auto paddingSlice = tensor::ExtractSliceOp::create(
+          b, loc, gatherOp.getPaddingValue(), offsets, sizes, strides);
+      padding = paddingSlice;
+      generatedSlices.push_back(paddingSlice);
+    }
+
+    auto resultType = RankedTensorType::get(
+        getShapeFromTileSizes(sizes), gatherOp.getType().getElementType());
+    auto tiledGather = cpu::GatherTileOp::create(
+        b, loc, resultType, gatherOp.getBase(), offsetsSlice, mask, padding);
+
+    return TilingResult{{tiledGather.getOperation()},
+                        {tiledGather.getResult()},
+                        generatedSlices};
+  }
+
+  LogicalResult
+  getResultTilePosition(Operation *op, OpBuilder &b, unsigned resultNumber,
+                        ArrayRef<OpFoldResult> offsets,
+                        ArrayRef<OpFoldResult> sizes,
+                        SmallVector<OpFoldResult> &resultOffsets,
+                        SmallVector<OpFoldResult> &resultSizes) const {
+    resultOffsets.assign(offsets.begin(), offsets.end());
+    resultSizes.assign(sizes.begin(), sizes.end());
+    return success();
+  }
+
+  FailureOr<TilingResult>
+  generateResultTileValue(Operation *op, OpBuilder &b, unsigned resultNumber,
+                          ArrayRef<OpFoldResult> offsets,
+                          ArrayRef<OpFoldResult> sizes) const {
+    if (resultNumber != 0) {
+      return failure();
+    }
+    return getTiledImplementation(op, b, offsets, sizes);
+  }
+};
+
 struct StorePtrTileOpTilingInterface
     : public TilingInterface::ExternalModel<StorePtrTileOpTilingInterface,
                                             cpu::StorePtrTileOp> {
@@ -319,6 +395,7 @@ namespace cpu {
 void registerTilingInterfaceExternalModels(DialectRegistry &registry) {
   registry.addExtension(+[](MLIRContext *ctx, CudaTileCPUDialect *dialect) {
     LoadPtrTileOp::attachInterface<LoadPtrTileOpTilingInterface>(*ctx);
+    GatherTileOp::attachInterface<GatherTileOpTilingInterface>(*ctx);
     StorePtrTileOp::attachInterface<StorePtrTileOpTilingInterface>(*ctx);
     LoadMemRefTileOp::attachInterface<LoadMemRefTileOpTilingInterface>(*ctx);
     StoreMemRefTileOp::attachInterface<StoreMemRefTileOpTilingInterface>(*ctx);

@@ -61,6 +61,66 @@ static Value readTensorAndCastTo1dVector(ConversionPatternRewriter &rewriter,
   return vec1d;
 }
 
+struct GatherTilePattern : public OpConversionPattern<cpu::GatherTileOp> {
+  using OpConversionPattern<cpu::GatherTileOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(cpu::GatherTileOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    auto resultType = op.getType();
+    auto offsetsType = op.getOffsets().getType();
+    int64_t numElements = resultType.getNumElements();
+
+    Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+    SmallVector<Value> zeroIndices(resultType.getRank(), zero);
+
+    Value mask;
+    if (op.getMask()) {
+      mask = readTensorAndCastTo1dVector(rewriter, loc, op.getMask(),
+                                         op.getMask().getType(), zeroIndices);
+    } else {
+      auto maskType = VectorType::get({numElements}, rewriter.getI1Type());
+      auto trueSplat =
+          DenseElementsAttr::get(maskType, rewriter.getBoolAttr(true));
+      mask = arith::ConstantOp::create(rewriter, loc, maskType, trueSplat);
+    }
+
+    auto vectorType =
+        VectorType::get({numElements}, resultType.getElementType());
+    Value passThru;
+    if (op.getPaddingValue()) {
+      passThru = readTensorAndCastTo1dVector(
+          rewriter, loc, op.getPaddingValue(), op.getPaddingValue().getType(),
+          zeroIndices);
+    } else {
+      passThru = ub::PoisonOp::create(rewriter, loc, vectorType);
+    }
+
+    auto baseType =
+        MemRefType::get({ShapedType::kDynamic}, resultType.getElementType());
+    Value baseSize = arith::ConstantIndexOp::create(rewriter, loc, numElements);
+    Value base =
+        cpu::MakeMemRefOp::create(rewriter, loc, baseType, op.getBase(),
+                                  ValueRange{baseSize}, ValueRange{});
+
+    Value indices = readTensorAndCastTo1dVector(rewriter, loc, op.getOffsets(),
+                                                offsetsType, zeroIndices);
+    Value gathered =
+        vector::GatherOp::create(rewriter, loc, vectorType, base,
+                                 ValueRange{zero}, indices, mask, passThru);
+
+    auto resultVectorType =
+        VectorType::get(resultType.getShape(), resultType.getElementType());
+    Value shaped =
+        vector::ShapeCastOp::create(rewriter, loc, resultVectorType, gathered);
+    Value empty = tensor::EmptyOp::create(rewriter, loc, resultType, {});
+    rewriter.replaceOpWithNewOp<vector::TransferWriteOp>(op, shaped, empty,
+                                                         zeroIndices);
+    return success();
+  }
+};
+
 // innerBodyBuilder must always create a yield op of the innermost loop.
 // if useInnerIterArg is set to to true, that yield must return a result.
 // the result is propagated to the outermost loop
@@ -435,11 +495,12 @@ struct LowerCudaTileCPUMemOps
 
     ConversionTarget target(*context);
     RewritePatternSet patterns(context);
-    patterns.add<LoadPtrTilePattern, StorePtrTilePattern, LoadMemRefTilePattern,
-                 StoreMemRefTilePattern>(context);
+    patterns.add<GatherTilePattern, LoadPtrTilePattern, StorePtrTilePattern,
+                 LoadMemRefTilePattern, StoreMemRefTilePattern>(context);
 
-    target.addIllegalOp<cpu::LoadPtrTileOp, cpu::StorePtrTileOp,
-                        cpu::LoadMemRefTileOp, cpu::StoreMemRefTileOp>();
+    target.addIllegalOp<cpu::GatherTileOp, cpu::LoadPtrTileOp,
+                        cpu::StorePtrTileOp, cpu::LoadMemRefTileOp,
+                        cpu::StoreMemRefTileOp>();
 
     target.addLegalDialect<
         ub::UBDialect, arith::ArithDialect, affine::AffineDialect,

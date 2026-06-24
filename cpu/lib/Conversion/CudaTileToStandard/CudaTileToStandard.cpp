@@ -400,9 +400,8 @@ struct ReshapePattern : public OpConversionPattern<cuda_tile::ReshapeOp> {
     if (sourceType.getRank() > 1) {
       ReassociationIndices sourceDims(sourceType.getRank());
       std::iota(sourceDims.begin(), sourceDims.end(), 0);
-      flat = tensor::CollapseShapeOp::create(
-          rewriter, op.getLoc(), source,
-          ArrayRef<ReassociationIndices>{sourceDims});
+      flat = tensor::CollapseShapeOp::create(rewriter, op.getLoc(), source,
+                                             sourceDims);
     }
 
     if (tensorType.getRank() == 1) {
@@ -412,8 +411,8 @@ struct ReshapePattern : public OpConversionPattern<cuda_tile::ReshapeOp> {
 
     ReassociationIndices resultDims(tensorType.getRank());
     std::iota(resultDims.begin(), resultDims.end(), 0);
-    rewriter.replaceOpWithNewOp<tensor::ExpandShapeOp>(
-        op, tensorType, flat, ArrayRef<ReassociationIndices>{resultDims});
+    rewriter.replaceOpWithNewOp<tensor::ExpandShapeOp>(op, tensorType, flat,
+                                                       resultDims);
     return success();
   }
 };
@@ -610,35 +609,6 @@ struct ConvertElementwise : public OpConversionPattern<T> {
   }
 };
 
-static FailureOr<cuda_tile::ConstantOp>
-getConstantFromReshapeBroadcastChain(Value value) {
-  while (true) {
-    if (auto constant = value.getDefiningOp<cuda_tile::ConstantOp>()) {
-      return constant;
-    } else if (auto broadcast = value.getDefiningOp<cuda_tile::BroadcastOp>()) {
-      value = broadcast.getSource();
-    } else if (auto reshape = value.getDefiningOp<cuda_tile::ReshapeOp>()) {
-      value = reshape.getSource();
-    } else {
-      return failure();
-    }
-  }
-}
-
-static bool isTileConstantAndEqualTo(Value value, double expected) {
-  auto constant = getConstantFromReshapeBroadcastChain(value);
-  if (failed(constant)) {
-    return false;
-  }
-
-  auto attr = dyn_cast<DenseFPElementsAttr>(constant->getValue());
-  if (!attr || !attr.isSplat()) {
-    return false;
-  }
-
-  return attr.getSplatValue<APFloat>().isExactlyValue(expected);
-}
-
 struct PowPattern : public OpConversionPattern<cuda_tile::PowOp> {
   using OpConversionPattern<cuda_tile::PowOp>::OpConversionPattern;
 
@@ -654,6 +624,36 @@ struct PowPattern : public OpConversionPattern<cuda_tile::PowOp> {
     rewriter.replaceOpWithNewOp<math::PowFOp>(op, adaptor.getSource(),
                                               adaptor.getExponent());
     return success();
+  }
+
+  static FailureOr<cuda_tile::ConstantOp>
+  getConstantFromReshapeBroadcastChain(Value value) {
+    while (true) {
+      if (auto constant = value.getDefiningOp<cuda_tile::ConstantOp>()) {
+        return constant;
+      } else if (auto broadcast =
+                     value.getDefiningOp<cuda_tile::BroadcastOp>()) {
+        value = broadcast.getSource();
+      } else if (auto reshape = value.getDefiningOp<cuda_tile::ReshapeOp>()) {
+        value = reshape.getSource();
+      } else {
+        return failure();
+      }
+    }
+  }
+
+  static bool isTileConstantAndEqualTo(Value value, double expected) {
+    auto constant = getConstantFromReshapeBroadcastChain(value);
+    if (failed(constant)) {
+      return false;
+    }
+
+    auto attr = dyn_cast<DenseFPElementsAttr>(constant->getValue());
+    if (!attr || !attr.isSplat()) {
+      return false;
+    }
+
+    return attr.getSplatValue<APFloat>().isExactlyValue(expected);
   }
 };
 
@@ -1414,6 +1414,23 @@ struct ForPattern : public OpConversionPattern<cuda_tile::ForOp> {
   }
 };
 
+static Value findScalarPointer(Value value) {
+  while (true) {
+    if (auto broadcast = value.getDefiningOp<cuda_tile::BroadcastOp>()) {
+      value = broadcast.getSource();
+      continue;
+    }
+    if (auto reshape = value.getDefiningOp<cuda_tile::ReshapeOp>()) {
+      value = reshape.getSource();
+      continue;
+    }
+    break;
+  }
+
+  auto type = dyn_cast<cuda_tile::TileType>(value.getType());
+  return type && type.getRank() == 0 ? value : Value{};
+}
+
 struct LoadPtrTkoPattern : public OpConversionPattern<cuda_tile::LoadPtrTkoOp> {
   using OpConversionPattern<cuda_tile::LoadPtrTkoOp>::OpConversionPattern;
 
@@ -1430,7 +1447,24 @@ struct LoadPtrTkoPattern : public OpConversionPattern<cuda_tile::LoadPtrTkoOp> {
       return success();
     }
 
-    auto loadOp = rewriter.replaceOpWithNewOp<cpu::LoadPtrTileOp>(
+    if (auto offset = op.getSource().getDefiningOp<cuda_tile::OffsetOp>()) {
+      Value originalBase = findScalarPointer(offset.getPtr());
+      if (originalBase) {
+        Value base = rewriter.getRemappedValue(originalBase);
+        Value offsets = rewriter.getRemappedValue(offset.getOffset());
+        if (!base || !offsets) {
+          return rewriter.notifyMatchFailure(
+              op, "gather base or offsets could not be remapped");
+        }
+
+        rewriter.replaceOpWithNewOp<cpu::GatherTileOp>(
+            op, ptrTy, base, offsets, adaptor.getMask(),
+            adaptor.getPaddingValue());
+        return success();
+      }
+    }
+
+    rewriter.replaceOpWithNewOp<cpu::LoadPtrTileOp>(
         op, ptrTy, adaptor.getSource(), adaptor.getMask(),
         adaptor.getPaddingValue());
     return success();

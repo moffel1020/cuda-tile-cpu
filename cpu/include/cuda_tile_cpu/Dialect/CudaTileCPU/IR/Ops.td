@@ -128,6 +128,26 @@ def CudaTileCPU_LoadPtrTileOp : CudaTileCPU_Op<"load_ptr_tile", [
   }];
 }
 
+def CudaTileCPU_GatherTileOp : CudaTileCPU_Op<"gather_tile", [
+  MemoryEffects<[MemRead]>,
+  AttrSizedOperandSegments
+]> {
+  let summary = "gather a tensor from element offsets relative to one base pointer";
+
+  let arguments = (ins I64:$base,
+                       RankedTensorOf<[AnyInteger]>:$offsets,
+                       Optional<RankedTensorOf<[I1]>>:$mask,
+                       Optional<AnyRankedTensor>:$paddingValue);
+
+  let results = (outs AnyRankedTensor:$result);
+
+  let assemblyFormat = [{
+    $base `,` $offsets (`,` $mask^)? (`,` $paddingValue^)?
+    attr-dict `:` type($base) `,` type($offsets)
+    (`,` type($mask)^)? (`,` type($paddingValue)^)? `->` type($result)
+  }];
+}
+
 def CudaTileCPU_LoadPtrOp : CudaTileCPU_Op<"load_ptr", [MemoryEffects<[MemRead]>]> {
   let summary = "load a scalar from a pointer";
 
