@@ -148,6 +148,23 @@ def CudaTileCPU_GatherTileOp : CudaTileCPU_Op<"gather_tile", [
   }];
 }
 
+def CudaTileCPU_ScatterTileOp : CudaTileCPU_Op<"scatter_tile", [
+  MemoryEffects<[MemWrite]>
+]> {
+  let summary = "scatter a tensor to element offsets relative to one base pointer";
+
+  let arguments = (ins I64:$base,
+                       RankedTensorOf<[AnyInteger]>:$offsets,
+                       AnyRankedTensor:$value,
+                       Optional<RankedTensorOf<[I1]>>:$mask);
+
+  let assemblyFormat = [{
+    $base `,` $offsets `,` $value (`,` $mask^)?
+    attr-dict `:` type($base) `,` type($offsets) `,` type($value)
+    (`,` type($mask)^)?
+  }];
+}
+
 def CudaTileCPU_LoadPtrOp : CudaTileCPU_Op<"load_ptr", [MemoryEffects<[MemRead]>]> {
   let summary = "load a scalar from a pointer";
 
